@@ -1,0 +1,76 @@
+:root {
+  --bg: #0f1419;
+  --panel: #1a2332;
+  --line: #2c3a4f;
+  --text: #e8eef7;
+  --muted: #8b9bb4;
+  --accent: #3d9cf0;
+  --bad: #f07178;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 "Segoe UI", "PingFang SC", sans-serif;
+}
+
+button,
+select,
+input {
+  background: #243044;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #081018;
+  font-weight: 600;
+}
+
+button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #081018;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 120px;
+}
+
+.field label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status {
+  color: var(--muted);
+  min-height: 20px;
+}
+
+.status.error {
+  color: var(--bad);
+}

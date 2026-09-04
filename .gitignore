@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 本地数据（SQLite / 因子 bin 等）
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# 前端构建产物（frontend/.gitignore 也会挡一层）
+node_modules/
+
+# IDE / 系统
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志
+*.log
+
+# 本地参考 dump（HTML、Next 壳、optimize 草稿等），不进仓
+doc/
+scripts/

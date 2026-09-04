@@ -1,0 +1,189 @@
+classDiagram
+direction TB
+
+namespace DailyUpdates {
+  class UnifiedScheduler {
+    +db_path: str
+    +analyze_config(dataset_config)
+    +execute_schedule(dataset_config, end_date)
+  }
+  class StockDataUpdater {
+    +storage: SQLiteStorage
+    +data_processor: DataProcessor
+    +update_all(end_date)
+    +update_market_data(end_date)
+    +install_new_dataset()
+  }
+  class DatasetInstaller {
+    +install_new_dataset()
+  }
+  class DataProcessor {
+    +data_sources: Dict
+    +fetch_dataset()
+    +process_datasets_for_date()
+  }
+  class DataSourceBase {
+    <<abstract>>
+    +fetch_data(config, start_date, end_date)
+  }
+  class TushareDataSource {
+    +fetch_data()
+  }
+  class AkshareDataSource {
+    +fetch_data()
+  }
+  class SQLiteStorage {
+    +upsert_market_data()
+    +read_market_data()
+    +list_trade_dates()
+  }
+  class BinStorage {
+    +upsert_factor_data()
+    +read_factor_panel()
+  }
+  class FactorUpdater {
+    +storage: SQLiteStorage
+    +bin_storage: BinStorage
+    +update_factors()
+    +purge_removed_factors()
+  }
+  class BaseFactor {
+    <<abstract>>
+    +get_name()
+    +calculate(data)
+  }
+}
+
+namespace FactorEvaluates {
+  class FactorEvalService {
+    +warmup()
+    +evaluate()
+  }
+  class BaseMetric {
+    <<abstract>>
+    +compute()
+  }
+  class ExposureEngine {
+    +build()
+    +regress()
+  }
+  class StyleReturnEngine {
+    +estimate()
+  }
+  class BatchEvalRunner {
+    +run()
+  }
+}
+
+namespace Universes {
+  class Universe {
+    +name: str
+    +build_mask()
+  }
+}
+
+namespace StrategyEngine {
+  class Strategy {
+    <<abstract>>
+    +name: str
+    +score(ctx) TargetHoldings
+  }
+  class DayContext {
+    +universe()
+    +factor()
+    +market()
+  }
+  class Engine {
+    +run(strategy) EngineResult
+  }
+  class PanelStore {
+    +load()
+    +day_context()
+  }
+  class Broker {
+    <<interface>>
+    +fill()
+  }
+  class OpenFillExecutor {
+    +fill()
+  }
+  class Allocator {
+    <<interface>>
+    +size(ctx, candidates)
+  }
+  class EqualWeight
+  class WindowAllocator
+  class AttributionEngine {
+    +run(payload)
+  }
+  class Evaluate {
+    +attribute_snapshot(run)
+    +attribute_for_web(run)
+  }
+  class QmtOrderPlan {
+    +write()
+  }
+}
+
+namespace Strategies {
+  class FactorTopK {
+    +score(ctx)
+  }
+  class SmallCapStrategy {
+    +score(ctx)
+  }
+}
+
+namespace StyleCrowding {
+  class StyleCrowdingContext {
+    +group()
+  }
+}
+
+namespace App {
+  class WebState {
+    +engine() FactorEvalService
+    +open_job()
+  }
+}
+
+UnifiedScheduler ..> StockDataUpdater : depends on
+UnifiedScheduler *-- SQLiteStorage : composes
+StockDataUpdater *-- DataProcessor : composes
+StockDataUpdater *-- DatasetInstaller : composes
+StockDataUpdater *-- SQLiteStorage : composes
+DatasetInstaller ..> DataProcessor : depends on
+DataProcessor ..> DataSourceBase : manages
+DataSourceBase <|-- TushareDataSource : inherits
+DataSourceBase <|-- AkshareDataSource : inherits
+FactorUpdater *-- SQLiteStorage : composes
+FactorUpdater *-- BinStorage : composes
+FactorUpdater ..> BaseFactor : discovers
+
+FactorEvalService ..> BaseMetric : depends on
+FactorEvalService ..> ExposureEngine : depends on
+StyleReturnEngine ..> ExposureEngine : depends on
+BatchEvalRunner ..> BaseMetric : depends on
+
+Engine *-- PanelStore : composes
+Engine ..> Strategy : depends on
+Engine ..> Broker : depends on
+Broker <|.. OpenFillExecutor : realizes
+Allocator <|.. EqualWeight : realizes
+Allocator <|.. WindowAllocator : realizes
+Strategy <|-- FactorTopK : inherits
+Strategy <|-- SmallCapStrategy : inherits
+Strategy ..> DayContext : depends on
+Strategy ..> Allocator : depends on
+Evaluate ..> AttributionEngine : run_attribution
+Evaluate ..> ExposureEngine : CNE5-lite
+Evaluate ..> StyleReturnEngine : factor returns
+Evaluate ..> SQLiteStorage : prices
+QmtOrderPlan ..> Strategy : live
+StyleCrowdingContext ..> ExposureEngine : depends on
+PanelStore ..> Universe : asof mask
+PanelStore ..> BinStorage : factors
+Universe ..> SQLiteStorage : members
+WebState *-- FactorEvalService : composes
+WebState ..> Engine : backtest
+WebState ..> Evaluate : attribute
