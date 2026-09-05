@@ -92,7 +92,8 @@ def main():
             'primary_key': ['src', 'index_code'],
         },
         # 申万行业成分：https://tushare.pro/document/2?doc_id=335
-        # is_new 不传 = 拉全量历史（含调入/调出）；写入时按 src 整表替换，无需手删库。
+        # is_new 缺省时源会显式拉 Y+N（Tushare 默认 Y，不传拿不到调出历史）。
+        # 写入时按 src 整表替换，无需手删库。
         'sw_industry_member': {
             'data_source': 'Tushare',
             'data_type': 'industry',
@@ -176,12 +177,13 @@ def main():
             'fields': ['ts_code', 'trade_date', 'adj_factor'],
             'primary_key': ['ts_code', 'trade_date'],
         },
-        # 涨跌停价（写入 market_data）
+        # 涨跌停价（写入 market_data）。Tushare 早期交易日经常无此表，空则跳过，不挡日线。
         'stk_limit': {
             'data_source': 'Tushare',
             'data_type': 'daily',
             'api_name': 'stk_limit',
             'token': tushare_token,
+            'optional': True,
             'fields': ['ts_code', 'trade_date', 'up_limit', 'down_limit'],
             'primary_key': ['ts_code', 'trade_date'],
         },

@@ -32,11 +32,6 @@ def _src():
     return AkshareDataSource()
 
 
-def test_live_trading_calendar():
-    assert _src().is_trading_day("20260823") is False  # Sunday
-    assert _src().is_trading_day("20260824") is True
-
-
 def test_live_daily_two_stocks():
     out = _src().fetch_data(
         {

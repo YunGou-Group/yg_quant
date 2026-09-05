@@ -793,6 +793,10 @@ class SQLiteStorage:
         with self._connect() as connection:
             return pd.read_sql_query(sql, connection)
 
+    def clear_stock_namechange(self) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM stock_namechange")
+
     def count_stock_namechange(self) -> int:
         with self._connect() as connection:
             row = connection.execute(
@@ -1211,6 +1215,16 @@ class SQLiteStorage:
             for row in frame[columns].itertuples(index=False, name=None)
         ]
         return columns, rows, sorted(frame["index_code"].unique())
+
+    def list_index_constituent_codes(self) -> List[str]:
+        with self._connect() as connection:
+            return [
+                str(row["index_code"])
+                for row in connection.execute(
+                    "SELECT DISTINCT index_code FROM index_constituent "
+                    "ORDER BY index_code"
+                )
+            ]
 
     def get_index_constituent_latest_date(
         self, index_codes: Optional[Sequence[str]] = None

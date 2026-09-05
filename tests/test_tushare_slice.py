@@ -119,7 +119,7 @@ def test_index_weight_install_reuses_existing_rows():
         def get_index_constituent_latest_date(self, codes=None):
             return "2026-08-31"
 
-    mode, start = DatasetInstaller(Store(), None)._resolve_sidecar_mode(
+    mode, start = DatasetInstaller(Store(), None, None)._resolve_sidecar_mode(
         {
             "data_type": "index_constituent",
             "api_name": "index_weight",
@@ -138,7 +138,7 @@ def test_index_weight_install_full_when_table_empty():
         def get_index_constituent_latest_date(self, codes=None):
             return None
 
-    mode, start = DatasetInstaller(Store(), None)._resolve_sidecar_mode(
+    mode, start = DatasetInstaller(Store(), None, None)._resolve_sidecar_mode(
         {
             "data_type": "index_constituent",
             "api_name": "index_weight",
@@ -148,6 +148,52 @@ def test_index_weight_install_full_when_table_empty():
     )
     assert mode == "full"
     assert start is None
+
+
+def test_index_weight_backfills_missing_codes_then_incremental():
+    from DailyUpdates.data_fetcher.dataset_installer import DatasetInstaller
+
+    fetched = []
+
+    class Store:
+        def get_calendar_range(self):
+            return "2005-01-04", "2026-09-04"
+
+        def get_index_constituent_latest_date(self, codes=None):
+            return "2026-08-31"
+
+        def list_index_constituent_codes(self):
+            return ["000300.SH"]
+
+        def upsert_index_constituents(self, data):
+            return len(data)
+
+    class Fetcher:
+        def fetch_dataset(self, config, start, end):
+            fetched.append((list(config.get("index_list") or []), start, end))
+            codes = list(config["index_list"])
+            return pd.DataFrame(
+                {
+                    "index_code": codes,
+                    "con_code": ["000001.SZ"] * len(codes),
+                    "trade_date": [end] * len(codes),
+                    "weight": [1.0] * len(codes),
+                }
+            )
+
+    installer = DatasetInstaller(Store(), Fetcher(), None)
+    ok = installer.update_sidecar_dataset(
+        "universe_index_weight",
+        {
+            "data_type": "index_constituent",
+            "api_name": "index_weight",
+            "index_list": ["000300.SH", "000985.SH"],
+        },
+        end_date="20260904",
+    )
+    assert ok is True
+    assert fetched[0] == (["000985.SH"], "20050104", "20260904")
+    assert fetched[1] == (["000300.SH", "000985.SH"], "20260831", "20260904")
 
 
 def _index_src(monkeypatch):
@@ -220,6 +266,64 @@ def test_index_weight_probe_uses_previous_month(monkeypatch):
             ["index_code", "con_code", "trade_date", "weight"], "20260903"
         )
     assert windows == [("20260801", "20260831")] * 3
+
+
+def test_index_member_omitted_is_new_fetches_both_flags(monkeypatch):
+    src = TushareDataSource()
+    src.pro = type("Pro", (), {"index_member_all": object()})()
+    monkeypatch.setattr(
+        "DailyUpdates.data_fetcher.data_sources.tushare_data_source.time.sleep",
+        lambda *_a, **_k: None,
+    )
+    src._fetch_index_classify = lambda *_a, **_k: pd.DataFrame(
+        {"index_code": ["801010.SI"], "industry_name": ["农林牧渔"]}
+    )
+    seen = []
+
+    def fake_call(getter, paras, fields=None):
+        seen.append((paras.get("l1_code"), paras.get("is_new")))
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "l3_code": ["801016.SI"],
+                "in_date": ["20200101"],
+                "is_new": [paras["is_new"]],
+            }
+        )
+
+    monkeypatch.setattr(src, "_call_api", fake_call)
+    out = src._fetch_index_member_all(
+        {"src": "SW2021", "fields": ["ts_code", "l3_code", "in_date", "is_new"]},
+        ["ts_code", "l3_code", "in_date", "is_new"],
+    )
+    assert seen == [("801010.SI", "Y"), ("801010.SI", "N")]
+    assert len(out) == 1
+
+
+def test_index_weight_partial_empty_fails(monkeypatch):
+    src = _index_src(monkeypatch)
+
+    def fake_call(getter, paras, fields=None):
+        code = paras["index_code"]
+        if code in {"000016.SH", "399300.SZ", "000905.SH"}:
+            return pd.DataFrame(
+                {
+                    "index_code": [code],
+                    "con_code": ["000001.SZ"],
+                    "trade_date": [paras["start_date"]],
+                    "weight": [1.0],
+                }
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(src, "_call_api", fake_call)
+    with pytest.raises(RuntimeError, match="000985"):
+        src._fetch_index_weight(
+            {"index_list": ["000016.SH", "000985.SH"], "pause_seconds": 0},
+            ["index_code", "con_code", "trade_date", "weight"],
+            "20200101",
+            "20200131",
+        )
 
 
 def test_index_weight_early_month_has_no_new_snapshot(monkeypatch):

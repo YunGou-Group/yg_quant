@@ -4,6 +4,10 @@
 
 from __future__ import annotations
 
+import os
+
+from yg_quant_repo import load_repo_env
+
 
 def test_storage_and_updater_imports():
     from DailyUpdates.storage import BinStorage, SQLiteStorage
@@ -54,3 +58,15 @@ def test_strategy_and_universe_imports():
     assert default_settings().output_root
     assert "all" in names()
     assert SmallCapStrategy.name
+
+
+def test_load_repo_env_fills_missing_without_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("YG_QUANT_ENV_KEEP", "keep")
+    monkeypatch.delenv("YG_QUANT_ENV_NEW", raising=False)
+    (tmp_path / ".env").write_text(
+        "YG_QUANT_ENV_KEEP=new\nYG_QUANT_ENV_NEW=from-file\n# comment\n",
+        encoding="utf-8",
+    )
+    load_repo_env(tmp_path)
+    assert os.environ["YG_QUANT_ENV_KEEP"] == "keep"
+    assert os.environ["YG_QUANT_ENV_NEW"] == "from-file"

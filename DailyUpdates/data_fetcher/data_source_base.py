@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import ClassVar, Dict, Iterator, Optional
+from typing import ClassVar, Dict, Iterator
 
 import pandas as pd
 
@@ -34,12 +34,6 @@ class DataSourceBase(ABC):
     def uses_range_window(cls) -> bool:
         """引擎应把 start/end 一次交给本源，由源内部按股票或面板切片。"""
         return cls.fetch_slice in (FetchSlice.BY_SYMBOL, FetchSlice.BY_PANEL)
-
-    @classmethod
-    def is_trading_day(cls, yyyymmdd: str) -> Optional[bool]:
-        """已知则返回是否交易日；未知返回 None，由调用方换日历。"""
-        del yyyymmdd
-        return None
 
     @abstractmethod
     def fetch_data(self, config: Dict, start_date: str, end_date: str) -> pd.DataFrame:

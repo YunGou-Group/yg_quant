@@ -165,14 +165,27 @@ class TushareDataSource(DataSourceBase):
         print(f"[industry] index_classify 合计 {len(result)} 行", flush=True)
         return result
 
+    @staticmethod
+    def _index_member_flags(is_new) -> List[str]:
+        """Tushare index_member_all 默认 is_new=Y，不传拿不到调出历史。
+
+        配置缺省时显式拉 Y+N；显式传入则只拉该档。
+        """
+        if is_new is None:
+            return ["Y", "N"]
+        return [str(is_new)]
+
     def _fetch_index_member_all(self, config: Dict, fields) -> pd.DataFrame:
         """申万行业成分：https://tushare.pro/document/2?doc_id=335"""
         src = config.get('src', 'SW2021')
-        # None / 缺省 = 不传 is_new，拉全量历史成分；显式 'Y'/'N' 才过滤。
         is_new = config.get('is_new', None)
+        flags = self._index_member_flags(is_new)
         field_list = self._as_field_list(fields)
         # 全表一次拉取会被截断（实测约 3000 行）；按一级行业分页更完整且更快。
-        print(f"[industry] 准备按 L1 拉取成分 src={src}, is_new={is_new}", flush=True)
+        print(
+            f"[industry] 准备按 L1 拉取成分 src={src}, is_new={is_new}, flags={flags}",
+            flush=True,
+        )
         classify = self._fetch_index_classify(
             {
                 'src': src,
@@ -207,22 +220,21 @@ class TushareDataSource(DataSourceBase):
             progress.set_postfix_str(
                 f"{index_code} {industry_name[:8]} rows={row_count}"
             )
-            paras = {'l1_code': index_code}
-            if is_new is not None:
-                paras['is_new'] = is_new
-            part = self._call_api(self.pro.index_member_all, paras, field_list)
-            if part is None or part.empty:
-                empty_count += 1
+            for flag in flags:
+                paras = {'l1_code': index_code, 'is_new': flag}
+                part = self._call_api(self.pro.index_member_all, paras, field_list)
+                if part is None or part.empty:
+                    empty_count += 1
+                    time.sleep(0.15)
+                    continue
+                frames.append(part)
+                row_count += len(part)
+                if len(part) >= 2000:
+                    tqdm.write(
+                        f"[industry] 警告: {index_code}({industry_name}) "
+                        f"is_new={flag} 返回 {len(part)} 行，可能被 2000 上限截断"
+                    )
                 time.sleep(0.15)
-                continue
-            frames.append(part)
-            row_count += len(part)
-            if len(part) >= 2000:
-                tqdm.write(
-                    f"[industry] 警告: {index_code}({industry_name}) "
-                    f"返回 {len(part)} 行，可能被 2000 上限截断"
-                )
-            time.sleep(0.15)
 
         print(
             f"[industry] 成分拉取结束: 成功行业={len(frames)}, "
@@ -543,6 +555,13 @@ class TushareDataSource(DataSourceBase):
                 flush=True,
             )
             return pd.DataFrame()
+        empty_codes = [code for code, rows in hits.items() if rows == 0]
+        if empty_codes:
+            raise RuntimeError(
+                f"index_weight 以下指数全程 0 行: {empty_codes}。"
+                "接口无权限或代码无效时通常不报错、只给空表；"
+                "其它指数已有数据时不能把缺表当成成功。"
+            )
         result = pd.concat(frames, ignore_index=True)
         subset = [
             c for c in ["index_code", "con_code", "trade_date"] if c in result.columns

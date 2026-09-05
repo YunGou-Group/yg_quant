@@ -255,7 +255,7 @@ def test_updater_uses_range_window_from_source_class():
         }
 
     updater = StockDataUpdater.__new__(StockDataUpdater)
-    updater.data_processor = _Proc()
+    updater.data_fetcher = _Proc()
     updater.dataset_config = {
         "daily": {"data_source": "Akshare", "data_type": "daily", "api_name": "daily"}
     }

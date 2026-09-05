@@ -1,6 +1,8 @@
 """数据源按 FetchSlice 分类，引擎不按厂商名硬编码。"""
 
-from DailyUpdates.data_fetcher.data_processor import market_uses_range_window
+import pandas as pd
+
+from DailyUpdates.data_fetcher.data_fetcher import DataFetcher, market_uses_range_window
 from DailyUpdates.data_fetcher.data_source_base import DataSourceBase, FetchSlice
 from DailyUpdates.data_fetcher.dataset_installer import DatasetInstaller
 from DailyUpdates.data_fetcher.data_sources.akshare_data_source import AkshareDataSource
@@ -52,7 +54,7 @@ def test_installer_day_slice_only_for_by_date_sources():
         }
 
     installer = DatasetInstaller.__new__(DatasetInstaller)
-    installer.data_processor = _Proc()
+    installer.data_fetcher = _Proc()
     by_date = {"data_source": "Tushare", "api_name": "adj_factor"}
     by_symbol = {"data_source": "Akshare", "api_name": "adj_factor"}
     daily = {"data_source": "Tushare", "api_name": "daily"}
@@ -71,14 +73,33 @@ def test_token_injected_by_requires_token_flag():
     assert "token" not in out["ak"]
 
 
-def test_local_calendar_does_not_block_days_after_last_stored():
-    from DailyUpdates.data_fetcher.data_processor import DataProcessor
+def test_optional_empty_dataset_does_not_abort_day():
+    fetcher = DataFetcher.__new__(DataFetcher)
+    fetcher.data_source_classes = {"Tushare": object}
 
-    class Store:
-        def list_trade_dates(self, start_date=None, end_date=None):
-            return ["2026-08-28", "2026-08-31"]
+    def fake_fetch(config, start_date, end_date):
+        del start_date, end_date
+        if config.get("api_name") == "stk_limit":
+            return pd.DataFrame()
+        return pd.DataFrame({"ts_code": ["000001.SZ"], "close": [1.0]})
 
-    proc = DataProcessor(storage=Store())
-    assert proc._is_trading_day("20260831") is True
-    assert proc._is_trading_day("20260829") is False
-    assert proc._is_trading_day("20260903") is True
+    fetcher._create_data_source_and_fetch = fake_fetch
+    frames = fetcher.fetch_market_datasets(
+        {
+            "daily": {
+                "data_source": "Tushare",
+                "data_type": "daily",
+                "api_name": "daily",
+            },
+            "stk_limit": {
+                "data_source": "Tushare",
+                "data_type": "daily",
+                "api_name": "stk_limit",
+                "optional": True,
+            },
+        },
+        "20050104",
+        "20050104",
+    )
+    assert "daily" in frames
+    assert "stk_limit" not in frames

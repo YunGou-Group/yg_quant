@@ -195,18 +195,6 @@ class AkshareDataSource(DataSourceBase):
     fetch_slice = FetchSlice.BY_SYMBOL
     requires_token = False
 
-    @classmethod
-    def is_trading_day(cls, yyyymmdd: str) -> Optional[bool]:
-        frame = ak.tool_trade_date_hist_sina()
-        if frame is None or frame.empty:
-            return True
-        col = "trade_date" if "trade_date" in frame.columns else frame.columns[0]
-        days = {pd.Timestamp(v).strftime("%Y%m%d") for v in frame[col]}
-        hit = str(yyyymmdd).replace("-", "") in days
-        if not hit:
-            print(f"日期 {yyyymmdd} 不是交易日（数据源日历）")
-        return hit
-
     def fetch_data(self, config: Dict, start_date: str, end_date: str) -> pd.DataFrame:
         data_type = str(config.get("data_type") or "daily")
         api_name = str(config.get("api_name") or data_type)

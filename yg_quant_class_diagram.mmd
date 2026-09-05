@@ -9,6 +9,7 @@ namespace DailyUpdates {
   }
   class StockDataUpdater {
     +storage: SQLiteStorage
+    +data_fetcher: DataFetcher
     +data_processor: DataProcessor
     +update_all(end_date)
     +update_market_data(end_date)
@@ -17,10 +18,15 @@ namespace DailyUpdates {
   class DatasetInstaller {
     +install_new_dataset()
   }
-  class DataProcessor {
-    +data_sources: Dict
+  class DataFetcher {
+    +data_source_classes: Dict
     +fetch_dataset()
-    +process_datasets_for_date()
+    +fetch_market_datasets()
+  }
+  class DataProcessor {
+    +normalize_dataframe()
+    +merge_and_fill()
+    +build_panel()
   }
   class DataSourceBase {
     <<abstract>>
@@ -149,11 +155,13 @@ namespace App {
 
 UnifiedScheduler ..> StockDataUpdater : depends on
 UnifiedScheduler *-- SQLiteStorage : composes
+StockDataUpdater *-- DataFetcher : composes
 StockDataUpdater *-- DataProcessor : composes
 StockDataUpdater *-- DatasetInstaller : composes
 StockDataUpdater *-- SQLiteStorage : composes
+DatasetInstaller ..> DataFetcher : depends on
 DatasetInstaller ..> DataProcessor : depends on
-DataProcessor ..> DataSourceBase : manages
+DataFetcher ..> DataSourceBase : manages
 DataSourceBase <|-- TushareDataSource : inherits
 DataSourceBase <|-- AkshareDataSource : inherits
 FactorUpdater *-- SQLiteStorage : composes

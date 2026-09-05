@@ -15,7 +15,7 @@ from DailyUpdates.data_fetcher.dataset_installer import (
     is_industry_dataset,
     is_sidecar_dataset,
 )
-from DailyUpdates.data_fetcher.data_processor import discover_data_source_classes
+from DailyUpdates.data_fetcher.data_fetcher import discover_data_source_classes
 from DailyUpdates.data_fetcher.stock_data_updater import StockDataUpdater
 from DailyUpdates.storage import SQLiteStorage
 from yg_quant_repo import default_db_path
@@ -237,6 +237,9 @@ class UnifiedScheduler:
             elif data_type == "stock_info" and api_name == "stock_basic":
                 self.storage.clear_stock_basic()
                 logs.append(f"已清空 stock_basic ({name})")
+            elif data_type == "stock_info" and api_name == "namechange":
+                self.storage.clear_stock_namechange()
+                logs.append(f"已清空 stock_namechange ({name})")
             elif data_type == "financial":
                 self.storage.clear_financial_indicator()
                 logs.append(f"已清空 financial_indicator ({name})")

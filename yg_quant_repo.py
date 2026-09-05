@@ -29,8 +29,29 @@ def repo_root(start: Optional[PathLike] = None) -> Path:
     )
 
 
+def load_repo_env(root: Optional[PathLike] = None) -> Path:
+    """读取仓库根 ``.env``，只填补进程里还没有的变量，不覆盖已有环境。"""
+    path = Path(root or repo_root()) / ".env"
+    if not path.is_file():
+        return path
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+    return path
+
+
 def ensure_repo_root(start: Optional[PathLike] = None) -> Path:
     root = repo_root(start)
+    load_repo_env(root)
     text = str(root)
     if text not in sys.path:
         sys.path.insert(0, text)

@@ -28,7 +28,9 @@ import tushare as ts
 from loguru import logger
 from tqdm import tqdm
 
-from DailyUpdates.data_fetcher.data_processor import DataProcessor, market_uses_range_window
+from DailyUpdates.data_fetcher.data_fetcher import DataFetcher, market_uses_range_window
+from DailyUpdates.data_fetcher.data_processor import DataProcessor
+from DailyUpdates.preprocessing.market_bars import load_prev_adj
 from DailyUpdates.data_fetcher.dataset_installer import DatasetInstaller, is_sidecar_dataset
 from DailyUpdates.storage import SQLiteStorage
 
@@ -53,8 +55,11 @@ class StockDataUpdater:
         if tushare_token:
             ts.set_token(tushare_token)
             self.pro = ts.pro_api()
-        self.data_processor = DataProcessor(tushare_pro=self.pro, storage=self.storage)
-        self.dataset_installer = DatasetInstaller(self.storage, self.data_processor)
+        self.data_fetcher = DataFetcher(tushare_pro=self.pro, storage=self.storage)
+        self.data_processor = DataProcessor()
+        self.dataset_installer = DatasetInstaller(
+            self.storage, self.data_fetcher, self.data_processor
+        )
 
         self.dataset_config = dataset_config or {
             "daily": {
@@ -124,12 +129,21 @@ class StockDataUpdater:
         market_config, _ = self._split_configs()
         if not market_config:
             return pd.DataFrame()
-        data = self.data_processor.process_datasets_for_date(
+        frames = self.data_fetcher.fetch_market_datasets(
+            market_config, start_date, end_date
+        )
+        prev_adj = (
+            load_prev_adj(self.storage, start_date)
+            if _config_has_adj_factor(market_config)
+            else None
+        )
+        data = self.data_processor.build_panel(
+            frames,
             market_config,
             start_date,
-            end_date,
             self.get_current_stock_codes(),
             self._get_all_fields(),
+            prev_adj=prev_adj,
         )
         if data is None or data.empty:
             logger.warning(f"{start_date} 至 {end_date} 没有数据")
@@ -186,7 +200,7 @@ class StockDataUpdater:
         """按数据源类上的 FetchSlice 决定窗口，不按厂商名分支。"""
         market, _ = self._split_configs()
         return market_uses_range_window(
-            market.values(), self.data_processor.data_source_classes
+            market.values(), self.data_fetcher.data_source_classes
         )
 
     def _upsert_range(self, start_date: str, end_date: str) -> int:
@@ -220,38 +234,71 @@ class StockDataUpdater:
             if frame.empty:
                 return []
             col = "cal_date" if "cal_date" in frame.columns else frame.columns[0]
-            return [pd.Timestamp(str(v)).strftime("%Y-%m-%d") for v in frame[col]]
-        days = [
+            days = [pd.Timestamp(str(v)).strftime("%Y-%m-%d") for v in frame[col]]
+        else:
+            days = [
+                str(d)
+                for d in self.storage.list_trade_dates(
+                    start_date=start_iso, end_date=end_iso
+                )
+            ]
+            if days:
+                last = max(str(d).replace("-", "")[:8] for d in days)
+                if last < digits_e:
+                    raise RuntimeError(
+                        f"本地交易日历只到 {last}，覆盖不到 {end_iso}，且没有远端日历"
+                    )
+            else:
+                raise RuntimeError(
+                    f"无交易日历覆盖 {start_iso} ~ {end_iso}，拒绝按自然日探测"
+                )
+        # trade_cal 常按新日期在前返回；升序才能沿 (symbol, trade_date) 追加写入。
+        return sorted(days)
+
+    def _missing_trade_days(self, start: str, end: str) -> list:
+        """远端已开市、本地日历没有的交易日（中间空洞，不是 latest 之后的增量）。"""
+        remote = self._trade_days(start, end)
+        digits_s = "".join(ch for ch in str(start) if ch.isdigit())[:8]
+        digits_e = "".join(ch for ch in str(end) if ch.isdigit())[:8]
+        start_iso = f"{digits_s[:4]}-{digits_s[4:6]}-{digits_s[6:8]}"
+        end_iso = f"{digits_e[:4]}-{digits_e[4:6]}-{digits_e[6:8]}"
+        local = set(
             str(d)
             for d in self.storage.list_trade_dates(
                 start_date=start_iso, end_date=end_iso
             )
-        ]
-        if days:
-            last = max(str(d).replace("-", "")[:8] for d in days)
-            if last < digits_e:
-                raise RuntimeError(
-                    f"本地交易日历只到 {last}，覆盖不到 {end_iso}，且没有远端日历"
-                )
-            return days
-        raise RuntimeError(
-            f"无交易日历覆盖 {start_iso} ~ {end_iso}，拒绝按自然日探测"
         )
+        return [day for day in remote if day not in local]
+
+    def _write_trade_days(self, days: list) -> bool:
+        if not days:
+            return True
+        start_ymd = str(days[0]).replace("-", "")
+        end_ymd = str(days[-1]).replace("-", "")
+        if self._market_uses_range_window():
+            written = self._upsert_range(start_ymd, end_ymd)
+            if written <= 0:
+                logger.error(
+                    "%s ~ %s 有 %s 个交易日但写入 0 行", start_ymd, end_ymd, len(days)
+                )
+                return False
+            return True
+        failed = []
+        for trade_date in tqdm(days, desc="行情写入"):
+            ymd = str(trade_date).replace("-", "")
+            if self.update_all_stock_by_trade_day(ymd) <= 0:
+                failed.append(trade_date)
+        if failed:
+            logger.error("预期交易日写入 0 行: %s", failed)
+            return False
+        return True
 
     def rebuild_market_data(self, end_date: Optional[str] = None) -> bool:
         end_date = end_date or datetime.date.today().strftime("%Y%m%d")
+        days = self._trade_days(self.first_date_str, end_date)
         if self._market_uses_range_window():
             logger.info("行情源按区间拉取（BY_SYMBOL/BY_PANEL），一次写入整个窗口")
-            return self._upsert_range(self.first_date_str, end_date) > 0
-        wrote_any = False
-        for trade_date in tqdm(
-            self._trade_days(self.first_date_str, end_date), desc="重建历史数据"
-        ):
-            wrote_any = (
-                self.update_all_stock_by_trade_day(trade_date.replace("-", "")) > 0
-                or wrote_any
-            )
-        return wrote_any
+        return self._write_trade_days(days)
 
     def update_market_data(self, end_date: Optional[str] = None, start_date: Optional[str] = None):
         end_date = end_date or datetime.date.today().strftime("%Y%m%d")
@@ -265,30 +312,25 @@ class StockDataUpdater:
         start = pd.Timestamp(latest) + pd.Timedelta(days=1)
         if start_date:
             start = max(start, pd.Timestamp(start_date))
-        if start > pd.Timestamp(end_date):
-            return True
-        start_ymd = start.strftime("%Y%m%d")
-        days = self._trade_days(start_ymd, end_date)
+        forward: list = []
+        if start <= pd.Timestamp(end_date):
+            forward = self._trade_days(start.strftime("%Y%m%d"), end_date)
+
+        cal_start, _cal_end = self.storage.get_calendar_range()
+        hole_start = pd.Timestamp(cal_start or latest)
+        if start_date:
+            hole_start = max(hole_start, pd.Timestamp(start_date))
+        holes = self._missing_trade_days(
+            hole_start.strftime("%Y%m%d"),
+            pd.Timestamp(latest).strftime("%Y%m%d"),
+        )
+        if holes:
+            logger.warning("本地日历缺交易日，将回填: %s", holes)
+        days = sorted(set(forward) | set(holes))
         if not days:
-            logger.info("%s ~ %s 没有交易日，跳过增量", start_ymd, end_date)
+            logger.info("没有需要写入的交易日，跳过增量")
             return True
-        if self._market_uses_range_window():
-            written = self._upsert_range(start_ymd, end_date)
-            if written <= 0:
-                logger.error(
-                    "%s ~ %s 有 %s 个交易日但写入 0 行", start_ymd, end_date, len(days)
-                )
-                return False
-            return True
-        failed = []
-        for trade_date in tqdm(days, desc="增量更新"):
-            ymd = trade_date.replace("-", "")
-            if self.update_all_stock_by_trade_day(ymd) <= 0:
-                failed.append(trade_date)
-        if failed:
-            logger.error("预期交易日写入 0 行: %s", failed)
-            return False
-        return True
+        return self._write_trade_days(days)
 
     def update_all(self, end_date: Optional[str] = None, start_date: Optional[str] = None):
         market_config, sidecar_config = self._split_configs()
@@ -307,6 +349,13 @@ class StockDataUpdater:
                 logger.exception("sidecar 更新失败")
                 ok = False
         return ok
+
+
+def _config_has_adj_factor(dataset_config) -> bool:
+    return any(
+        "adj_factor" in (config.get("fields") or [])
+        for config in dataset_config.values()
+    )
 
 
 def main():

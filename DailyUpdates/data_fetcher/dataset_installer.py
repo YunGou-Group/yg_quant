@@ -11,8 +11,9 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
-from DailyUpdates.data_fetcher.data_processor import source_class_for_config
+from DailyUpdates.data_fetcher.data_fetcher import source_class_for_config
 from DailyUpdates.data_fetcher.data_source_base import FetchSlice
+from DailyUpdates.preprocessing.market_bars import load_prev_adj
 
 SIDECAR_DATA_TYPES = {"industry", "stock_info", "financial", "index_constituent"}
 _TRUNCATED_BY_DATE_APIS = {"stk_limit", "daily_basic", "adj_factor"}
@@ -41,8 +42,9 @@ def always_full_sidecar(config: Dict) -> bool:
 
 
 class DatasetInstaller:
-    def __init__(self, storage, data_processor):
+    def __init__(self, storage, data_fetcher, data_processor):
         self.storage = storage
+        self.data_fetcher = data_fetcher
         self.data_processor = data_processor
 
     def install_new_dataset(
@@ -92,12 +94,23 @@ class DatasetInstaller:
                 else f", {len(stocks)} 只股票"
             )
         )
-        data = self.data_processor.process_datasets_for_date(
+        frames = self.data_fetcher.fetch_market_datasets(
             {dataset_name: dataset_config},
             start_date,
             end_date,
+        )
+        prev_adj = (
+            load_prev_adj(self.storage, start_date)
+            if "adj_factor" in (dataset_config.get("fields") or [])
+            else None
+        )
+        data = self.data_processor.build_panel(
+            frames,
+            {dataset_name: dataset_config},
+            start_date,
             stocks,
             set(),
+            prev_adj=prev_adj,
         )
         if data is None or data.empty:
             logger.error(f"数据集 {dataset_name} 未获取到数据")
@@ -111,7 +124,7 @@ class DatasetInstaller:
         """仅 BY_DATE 源的宽截面接口需要按交易日切片，避免一次返回被截断。"""
         if dataset_config.get("api_name") not in _TRUNCATED_BY_DATE_APIS:
             return False
-        classes = getattr(self.data_processor, "data_source_classes", None)
+        classes = getattr(self.data_fetcher, "data_source_classes", None)
         cls = source_class_for_config(dataset_config, classes)
         slice_kind = getattr(cls, "fetch_slice", FetchSlice.BY_DATE)
         return slice_kind == FetchSlice.BY_DATE
@@ -164,12 +177,17 @@ class DatasetInstaller:
         empty_days = 0
         for trade_date in tqdm(dates, desc=f"回填{dataset_name}"):
             day = trade_date.replace("-", "")
-            raw = self.data_processor.fetch_dataset(dataset_config, day, day)
+            raw = self.data_fetcher.fetch_dataset(dataset_config, day, day)
             if raw is None or raw.empty:
                 empty_days += 1
                 continue
-            data = self.data_processor._normalize_dataframe(
-                raw, dataset_name, dataset_config
+            prev_adj = (
+                load_prev_adj(self.storage, day)
+                if "adj_factor" in (dataset_config.get("fields") or [])
+                else None
+            )
+            data = self.data_processor.normalize_dataframe(
+                raw, dataset_name, dataset_config, prev_adj=prev_adj
             )
             if data is None or data.empty:
                 empty_days += 1
@@ -218,6 +236,8 @@ class DatasetInstaller:
                 extra = ""
                 if field == "adj_factor":
                     extra = " AND symbol NOT LIKE 'index_%'"
+                    if "close" in existing:
+                        extra += " AND close IS NOT NULL"
                 filled = {
                     row["trade_date"]
                     for row in connection.execute(
@@ -250,6 +270,7 @@ class DatasetInstaller:
             if not latest:
                 return "full", None
             # INSTALL 在注册表未保存时会反复以 mode=full 进来；表里已有截面则只补增量。
+            # 新加入 index_list 但库里还没有的指数，由 _write_sidecar_dataset 单独全量回填。
             return "incremental", latest.replace("-", "")
 
         if mode == "full" or always_full_sidecar(dataset_config):
@@ -283,6 +304,13 @@ class DatasetInstaller:
         # 未知 sidecar：保守全量
         return "full", None
 
+    def _missing_index_codes(self, dataset_config: Dict) -> List[str]:
+        wanted = [str(code) for code in (dataset_config.get("index_list") or [])]
+        if not wanted or not hasattr(self.storage, "list_index_constituent_codes"):
+            return wanted
+        present = {str(code) for code in self.storage.list_index_constituent_codes()}
+        return [code for code in wanted if code not in present]
+
     def _write_sidecar_dataset(
         self,
         dataset_name: str,
@@ -310,13 +338,47 @@ class DatasetInstaller:
             start = (incr_start or start_date or cal_start or "").replace("-", "")
             write_mode = "incremental"
 
+        if (
+            write_mode == "incremental"
+            and data_type == "index_constituent"
+            and api_name == "index_weight"
+        ):
+            missing = self._missing_index_codes(dataset_config)
+            if missing:
+                miss_cfg = dict(dataset_config)
+                miss_cfg["index_list"] = missing
+                start_full = (start_date or cal_start or "").replace("-", "")
+                logger.info(
+                    f"指数成分缺历史 {missing}，先全量回填 {start_full}->{end}"
+                )
+                try:
+                    miss_data = self.data_fetcher.fetch_dataset(
+                        miss_cfg, start_full, end
+                    )
+                except Exception:
+                    logger.exception(
+                        f"数据集 {dataset_name} 回填缺失指数失败: {missing}"
+                    )
+                    return False
+                if miss_data is None or miss_data.empty:
+                    logger.error(
+                        f"数据集 {dataset_name} 缺失指数 {missing} 未获取到数据"
+                    )
+                    return False
+                written = self.storage.upsert_index_constituents(miss_data)
+                if written <= 0:
+                    return False
+                logger.info(
+                    f"缺失指数 {missing} 已回填 {written} 行，继续增量 {start}->{end}"
+                )
+
         logger.info(
             f"{'全量' if write_mode == 'full' else '增量'}更新 sidecar "
             f"{dataset_name}: type={data_type}, api={api_name}, "
             f"range={start}->{end}"
         )
         try:
-            data = self.data_processor.fetch_dataset(dataset_config, start, end)
+            data = self.data_fetcher.fetch_dataset(dataset_config, start, end)
         except Exception:
             logger.exception(f"数据集 {dataset_name} 拉取失败")
             return False

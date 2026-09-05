@@ -22,6 +22,11 @@ class _Store:
             out = [d for d in out if d <= str(end_date)]
         return out
 
+    def get_calendar_range(self):
+        if not self.local_days:
+            return None, None
+        return min(self.local_days), max(self.local_days)
+
 
 class _Pro:
     def __init__(self, days):
@@ -42,7 +47,8 @@ def _updater(*, pro=None, latest="2026-09-02", local_days=None):
     updater.dataset_config = {
         "daily": {"data_source": "Tushare", "data_type": "daily", "fields": ["close"]}
     }
-    updater.data_processor = type("P", (), {"data_source_classes": {}})()
+    updater.data_fetcher = type("P", (), {"data_source_classes": {}})()
+    updater.data_processor = type("P", (), {})()
     updater.first_date_str = "20050101"
     return updater
 
@@ -50,6 +56,15 @@ def _updater(*, pro=None, latest="2026-09-02", local_days=None):
 def test_trade_days_uses_remote_calendar_after_local_end():
     updater = _updater(pro=_Pro(["20260902", "20260903"]))
     assert updater._trade_days("20260903", "20260903") == ["2026-09-03"]
+
+
+def test_trade_days_sorts_newest_first_calendar_ascending():
+    updater = _updater(pro=_Pro(["20260904", "20260903", "20260902"]))
+    assert updater._trade_days("20260902", "20260904") == [
+        "2026-09-02",
+        "2026-09-03",
+        "2026-09-04",
+    ]
 
 
 def test_trade_days_empty_remote_window_is_ok():
@@ -70,7 +85,11 @@ def test_update_fails_when_expected_session_writes_zero():
 
 
 def test_update_succeeds_when_already_current():
-    updater = _updater(pro=_Pro(["20260903"]), latest="2026-09-03")
+    updater = _updater(
+        pro=_Pro(["20260903"]),
+        latest="2026-09-03",
+        local_days=["2026-09-03"],
+    )
     assert updater.update_market_data(end_date="20260903") is True
 
 
@@ -79,3 +98,34 @@ def test_range_window_zero_rows_fails_if_sessions_exist():
     updater._market_uses_range_window = lambda: True
     updater._upsert_range = lambda start, end: 0
     assert updater.update_market_data(end_date="20260903") is False
+
+
+def test_update_backfills_calendar_holes_before_latest():
+    updater = _updater(
+        pro=_Pro(["20260901", "20260902", "20260903", "20260904"]),
+        latest="2026-09-04",
+        local_days=["2026-08-31", "2026-09-03", "2026-09-04"],
+    )
+    written = []
+    updater.update_all_stock_by_trade_day = lambda ymd: written.append(ymd) or 1
+    assert updater.update_market_data(end_date="20260904") is True
+    assert written == ["20260901", "20260902"]
+
+
+def test_rebuild_fails_when_expected_session_writes_zero():
+    updater = _updater(pro=_Pro(["20260903"]), latest=None)
+    updater.first_date_str = "20260903"
+    updater.update_all_stock_by_trade_day = lambda ymd: 0
+    assert updater.rebuild_market_data(end_date="20260903") is False
+
+
+def test_rebuild_writes_trade_days_ascending():
+    updater = _updater(
+        pro=_Pro(["20260904", "20260903", "20260902"]),
+        latest=None,
+    )
+    updater.first_date_str = "20260902"
+    written = []
+    updater.update_all_stock_by_trade_day = lambda ymd: written.append(ymd) or 1
+    assert updater.rebuild_market_data(end_date="20260904") is True
+    assert written == ["20260902", "20260903", "20260904"]
