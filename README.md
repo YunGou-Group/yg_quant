@@ -24,6 +24,26 @@ Python 3.10–3.12。MIT License，见 [LICENSE](LICENSE)。
 
 本仓库是研究工具，**不是**投资建议，也**不是**迅投 QMT / MSCI Barra 的官方产品。拉行情须遵守 Tushare / Akshare 的使用条款；你需要自备 `TUSHARE_TOKEN`。截图里的回测数字只是本地样例，不是收益承诺。
 
+## 效果展示
+
+因子分析与策略回测是并列入口。下面是本地网页的效果。
+
+**因子总览**（全库 RankIC / IR）：
+
+![因子总览](docs/screenshots/factor-eval.jpg)
+
+**深度报告**（单因子 IC 序列、分布与分层）：
+
+![深度报告](docs/screenshots/factor-detail.jpg)
+
+**策略回测**（默认参考策略 `small_cap`，等权，净值相对基准）：
+
+![小市值回测净值](docs/screenshots/backtest-nav.jpg)
+
+**业绩归因**（交易 / 持仓洋葱树，以及行业 Brinson、本地十风格）：
+
+![业绩归因](docs/screenshots/attribution.jpg)
+
 ## 可拓展
 
 研究链路每一层都是插件。放对目录、继承基类，调度器、命令行和网页会扫到，不必改 `__main__` 或 FastAPI 路由。仓位分配器例外：还要在 `REGISTRY` 登记一行。
@@ -84,26 +104,6 @@ class MyStrategy(Strategy):
 ```
 
 股票池更短：在 `Universes/` 加一个 `Universe` 子类、设 `name`（可选 `index_codes` / `boards`）即可。扩展示例清单见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 界面预览
-
-因子分析与策略回测是并列入口。下面是本地网页的效果。
-
-**因子总览**（全库 RankIC / IR）：
-
-![因子总览](docs/screenshots/factor-eval.jpg)
-
-**深度报告**（单因子 IC 序列、分布与分层）：
-
-![深度报告](docs/screenshots/factor-detail.jpg)
-
-**策略回测**（默认参考策略 `small_cap`，等权，净值相对基准）：
-
-![小市值回测净值](docs/screenshots/backtest-nav.jpg)
-
-**业绩归因**（交易 / 持仓洋葱树，以及行业 Brinson、本地十风格）：
-
-![业绩归因](docs/screenshots/attribution.jpg)
 
 ## 安装
 
