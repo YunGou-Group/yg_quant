@@ -403,6 +403,39 @@ class AttributionCoreTests(unittest.TestCase):
         self.assertClose(result["summary"]["attribution_gap"], 0.0)
         self.assertEqual(result["meta"]["methodology"]["return_basis"], "holding_return")
 
+    def test_stock_only_summary_uses_industry_bf(self):
+        result = run_attribution(
+            {
+                "asset_pool": ["stock"],
+                "returns": [
+                    {
+                        "period": "P1",
+                        "portfolio_return": 0.076,
+                        "benchmark_return": 0.055,
+                        "nav_begin": 100.0,
+                    }
+                ],
+                "stock": {
+                    "industry": {
+                        "portfolio": [
+                            {"period": "P1", "industry": "A", "weight": 0.7, "return": 0.10},
+                            {"period": "P1", "industry": "B", "weight": 0.3, "return": 0.02},
+                        ],
+                        "benchmark": [
+                            {"period": "P1", "industry": "A", "weight": 0.5, "return": 0.08},
+                            {"period": "P1", "industry": "B", "weight": 0.5, "return": 0.03},
+                        ],
+                    }
+                },
+            }
+        )
+        self.assertEqual(result["meta"]["methodology"]["allocation_selection"], "industry")
+        self.assertIn("industry", result["sections"])
+        self.assertIn("linked", result["sections"])
+        self.assertClose(result["summary"]["allocation_effect"], 0.010)
+        self.assertClose(result["summary"]["selection_effect"], 0.011)
+        self.assertClose(result["summary"]["holding_active_return"], 0.021)
+
     def test_engine_accepts_combined_dict_of_lists(self):
         result = run_attribution(
             {

@@ -22,6 +22,7 @@ from StrategyEngine.run import _SAFE_STEM, _runs_root
 from . import ledger
 from .engine import run_attribution
 from .factors import build_factor_payload, factor_group_totals, summarize_factor_rows
+from .linking import link_brinson_effects
 from .tree import returns_tree
 
 _LOG = logging.getLogger("StrategyEngine")
@@ -174,6 +175,12 @@ def web_view(report: Mapping[str, Any]) -> Dict[str, Any]:
     summary = dict(attr.get("summary") or {})
     sections = attr.get("sections") if isinstance(attr.get("sections"), Mapping) else {}
     industry = sections.get("industry") if isinstance(sections.get("industry"), Mapping) else {}
+    periods = attr.get("periods") or []
+    effect_rows = industry.get("rows") or []
+    if not effect_rows:
+        asset = sections.get("asset_class") if isinstance(sections.get("asset_class"), Mapping) else {}
+        effect_rows = asset.get("rows") or []
+    _fill_stock_brinson_summary(summary, effect_rows, periods)
     factor = sections.get("factor") if isinstance(sections.get("factor"), Mapping) else {}
     pnl = attr.get("pnl") if isinstance(attr.get("pnl"), Mapping) else {}
     warnings = []
@@ -217,7 +224,7 @@ def web_view(report: Mapping[str, Any]) -> Dict[str, Any]:
         "notes": [str(x) for x in (report.get("notes") or []) if x],
         "status": attr.get("status"),
         "summary": summary,
-        "returns_tree": returns_tree(summary),
+        "returns_tree": _tree_for_view(summary, periods, effect_rows),
         "pnl": by_period,
         "industry": {
             "title": industry.get("title") or "股票行业归因",
@@ -234,6 +241,54 @@ def web_view(report: Mapping[str, Any]) -> Dict[str, Any]:
         "warnings": warnings,
         "files": report.get("files") or {},
     }
+
+
+def _tree_for_view(
+    summary: Dict[str, Any],
+    periods: Sequence[Any],
+    effect_rows: Sequence[Any],
+) -> List[dict]:
+    tree = returns_tree(summary, periods=periods, effect_rows=effect_rows)
+    labels = {
+        "交易收益": "trade_return",
+        "杠杆收益": "leverage_return",
+        "持仓收益": "holding_return",
+        "主动收益": "holding_active_return",
+        "基准持仓收益": "benchmark_holding_return",
+        "股票配置收益": "allocation_effect",
+        "股票选择收益": "selection_effect",
+    }
+    for row in tree:
+        key = labels.get(str(row.get("label") or ""))
+        if key and row.get("value") is not None:
+            summary[key] = row["value"]
+    return tree
+
+
+def _fill_stock_brinson_summary(
+    summary: Dict[str, Any],
+    industry_rows: Sequence[Any],
+    periods: Sequence[Any],
+) -> None:
+    """Old stock-only reports left allocation/selection at 0; refill from industry BF."""
+    if _num(summary.get("allocation_effect")) or _num(summary.get("selection_effect")):
+        return
+    if not industry_rows:
+        return
+    frame = pd.DataFrame([row for row in industry_rows if isinstance(row, Mapping)])
+    if frame.empty or "allocation" not in frame.columns or "selection" not in frame.columns:
+        return
+    if float(frame["allocation"].fillna(0.0).abs().sum() + frame["selection"].fillna(0.0).abs().sum()) == 0.0:
+        return
+    period_rows = [row for row in periods if isinstance(row, Mapping)]
+    periods_frame = pd.DataFrame(period_rows) if period_rows else pd.DataFrame()
+    linked, _basis, _warnings = link_brinson_effects(frame, periods_frame)
+    if not linked.empty and "allocation_linked" in linked and "selection_linked" in linked:
+        summary["allocation_effect"] = float(linked["allocation_linked"].sum())
+        summary["selection_effect"] = float(linked["selection_linked"].sum())
+        return
+    summary["allocation_effect"] = float(pd.to_numeric(frame["allocation"], errors="coerce").fillna(0.0).sum())
+    summary["selection_effect"] = float(pd.to_numeric(frame["selection"], errors="coerce").fillna(0.0).sum())
 
 
 def _industry_totals(rows: Sequence[Any]) -> List[Dict[str, Any]]:

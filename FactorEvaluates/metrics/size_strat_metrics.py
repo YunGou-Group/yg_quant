@@ -14,7 +14,7 @@ from ..context import BatchEvalContext, EvalContext
 from ..field_doc import FieldDoc
 from ..metric_result import MetricResult
 from ..param_spec import HORIZON_PARAM, UNIVERSE_PARAM, ParamSpec
-from ..matrix_utils import apply_daily_matrix, assign_quantiles, result_from_daily, winsorize_1d
+from ..matrix_utils import apply_daily_matrix, assign_quantiles, result_from_daily
 
 N_SIZE = 5
 N_FACTOR_Q = 5
@@ -79,7 +79,6 @@ class SizeStratifiedMetric(BaseMetric):
         out["size_ls"] = nan.copy()
         if r is None or size is None:
             return out
-        r = winsorize_1d(r)
         size_q = assign_quantiles((-size)[:, None], N_SIZE)[:, 0]  # S1 = 最大市值
         longs, shorts = [], []
         for s in range(1, N_SIZE + 1):

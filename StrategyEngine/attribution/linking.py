@@ -24,6 +24,108 @@ from ._common import (
 from .models import reconciliation, warning
 
 
+def subsequent_growth(portfolio_returns: np.ndarray) -> np.ndarray:
+    """Each period's contribution is grown by all later portfolio returns."""
+    path = np.asarray(portfolio_returns, dtype=float)
+    growth = np.ones(len(path), dtype=float)
+    after = 1.0
+    for index in range(len(path) - 1, -1, -1):
+        growth[index] = after
+        after *= 1.0 + path[index]
+    return growth
+
+
+def wealth_link(contributions: np.ndarray, portfolio_returns: np.ndarray) -> float:
+    """Σ effect_t × Π_{k>t}(1 + r_k).  For ``contributions is r`` this is Π(1+r)−1."""
+    return float(np.sum(np.asarray(contributions, dtype=float) * subsequent_growth(portfolio_returns)))
+
+
+def additive_tree_values(
+    periods: Any,
+    effects: Any = None,
+) -> Optional[Dict[str, float]]:
+    """Wealth-link onion-tree nodes so every parent equals the sum of its children."""
+    frame = pd.DataFrame(periods) if periods is not None and not isinstance(periods, pd.DataFrame) else periods
+    if frame is None or frame.empty or "portfolio_return" not in frame.columns:
+        return None
+    work = frame.copy()
+    work["period"] = work["period"] if "period" in work.columns else range(len(work))
+    for column in (
+        "portfolio_return",
+        "trade_return",
+        "holding_return",
+        "leverage_return",
+        "benchmark_return",
+        "benchmark_holding_return",
+    ):
+        if column in work.columns:
+            work[column] = pd.to_numeric(work[column], errors="coerce")
+    if work["portfolio_return"].isna().any():
+        return None
+    port = work["portfolio_return"].to_numpy(dtype=float)
+    holding = work["holding_return"] if "holding_return" in work else pd.Series(dtype=float)
+    if holding.empty or holding.isna().any():
+        return None
+    holding_path = holding.to_numpy(dtype=float)
+    if "benchmark_holding_return" in work and work["benchmark_holding_return"].notna().all():
+        bench_holding_path = work["benchmark_holding_return"].to_numpy(dtype=float)
+    elif "benchmark_return" in work and work["benchmark_return"].notna().all():
+        bench_holding_path = work["benchmark_return"].to_numpy(dtype=float)
+    else:
+        return None
+    bench_path = (
+        work["benchmark_return"].to_numpy(dtype=float)
+        if "benchmark_return" in work and work["benchmark_return"].notna().all()
+        else bench_holding_path
+    )
+    trade_path = (
+        work["trade_return"].fillna(0.0).to_numpy(dtype=float)
+        if "trade_return" in work
+        else np.zeros(len(work))
+    )
+    leverage_path = (
+        work["leverage_return"].fillna(0.0).to_numpy(dtype=float)
+        if "leverage_return" in work
+        else np.zeros(len(work))
+    )
+    linked_holding = wealth_link(holding_path, port)
+    linked_bench_holding = wealth_link(bench_holding_path, port)
+    linked_active = wealth_link(holding_path - bench_holding_path, port)
+    linked_alloc = 0.0
+    linked_sel = 0.0
+    effect_frame = pd.DataFrame(effects) if effects is not None and not isinstance(effects, pd.DataFrame) else effects
+    if (
+        effect_frame is not None
+        and not effect_frame.empty
+        and {"period", "allocation", "selection"}.issubset(effect_frame.columns)
+    ):
+        grouped = (
+            effect_frame.assign(
+                allocation=pd.to_numeric(effect_frame["allocation"], errors="coerce").fillna(0.0),
+                selection=pd.to_numeric(effect_frame["selection"], errors="coerce").fillna(0.0),
+            )
+            .groupby("period", sort=False)[["allocation", "selection"]]
+            .sum()
+        )
+        alloc_path = work["period"].map(grouped["allocation"]).fillna(0.0).to_numpy(dtype=float)
+        sel_path = work["period"].map(grouped["selection"]).fillna(0.0).to_numpy(dtype=float)
+        linked_alloc = wealth_link(alloc_path, port)
+        linked_sel = wealth_link(sel_path, port)
+    return {
+        "portfolio_return": wealth_link(port, port),
+        "trade_return": wealth_link(trade_path, port),
+        "leverage_return": wealth_link(leverage_path, port),
+        "holding_return": linked_holding,
+        "holding_active_return": linked_active,
+        "benchmark_holding_return": linked_bench_holding,
+        "allocation_effect": linked_alloc,
+        "selection_effect": linked_sel,
+        "attribution_residual": linked_active - linked_alloc - linked_sel,
+        "benchmark_return": wealth_link(bench_path, port),
+        "penetration": linked_bench_holding - wealth_link(bench_path, port),
+    }
+
+
 def _carino_coefficient(portfolio_return: np.ndarray, benchmark_return: np.ndarray) -> np.ndarray:
     active = portfolio_return - benchmark_return
     numerator = np.log1p(portfolio_return) - np.log1p(benchmark_return)
@@ -180,3 +282,67 @@ def carino_link(
         effect_columns=effect_columns,
         linked_columns=linked_columns,
     )
+
+
+def link_brinson_effects(
+    effect_frame: pd.DataFrame,
+    periods_frame: Optional[pd.DataFrame] = None,
+    *,
+    tolerance: float = 1e-10,
+    totals: Any = None,
+    totals_basis: str = "input_fallback",
+) -> tuple[pd.DataFrame, str, List[Dict[str, Any]]]:
+    """Carino-link period allocation/selection onto holding (or total) active return.
+
+    Returns ``(linked_frame, return_basis, extra_warnings)``.  An empty
+    ``linked_frame`` means linking was skipped (no effects or no period returns).
+    """
+    extra_warnings: List[Dict[str, Any]] = []
+    if effect_frame is None or effect_frame.empty:
+        return pd.DataFrame(), "not_available", extra_warnings
+    if (
+        "period" not in effect_frame.columns
+        or "allocation" not in effect_frame.columns
+        or "selection" not in effect_frame.columns
+    ):
+        return pd.DataFrame(), "not_available", extra_warnings
+    effects = (
+        effect_frame.groupby("period", sort=False)[["allocation", "selection"]].sum().reset_index()
+    )
+    periods = periods_frame if periods_frame is not None else pd.DataFrame()
+    linking_returns = pd.DataFrame()
+    brinson_return_basis = "not_available"
+    if not periods.empty and "holding_return" in periods and periods["holding_return"].notna().all():
+        linking_returns = periods[["period", "holding_return", "benchmark_holding_return"]].rename(
+            columns={
+                "holding_return": "portfolio_return",
+                "benchmark_holding_return": "benchmark_return",
+            }
+        )
+        brinson_return_basis = "holding_return"
+    elif not periods.empty and "portfolio_return" in periods and "benchmark_return" in periods:
+        linking_returns = periods[["period", "portfolio_return", "benchmark_return"]]
+        brinson_return_basis = "total_return_fallback"
+        extra_warnings.append(
+            warning(
+                "brinson_total_return_fallback",
+                "Holding return is unavailable (usually because beginning NAV is missing); Brinson/Carino linking fell back to total portfolio return.",
+                severity="info",
+                scope="linking",
+            )
+        )
+    if linking_returns.empty and totals:
+        totals_frame = pd.DataFrame(totals)
+        if {"period", "portfolio_return", "benchmark_return"}.issubset(totals_frame.columns):
+            linking_returns = totals_frame[["period", "portfolio_return", "benchmark_return"]]
+            brinson_return_basis = totals_basis
+    if linking_returns.empty:
+        return pd.DataFrame(), brinson_return_basis, extra_warnings
+    linked = carino_link(
+        linking_returns,
+        effects,
+        effect_columns=["allocation", "selection"],
+        tolerance=tolerance,
+        enforce_reconciliation=True,
+    )
+    return linked, brinson_return_basis, extra_warnings

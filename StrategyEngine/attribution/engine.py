@@ -26,7 +26,7 @@ from .coerce import (
     _units_for_columns,
 )
 from .factor_decomp import factor_attribution
-from .linking import carino_link
+from .linking import link_brinson_effects, subsequent_growth
 from .models import (
     EXPECTED_INPUT_FIELDS,
     AttributionOutput,
@@ -514,65 +514,40 @@ def run_attribution(payload: Mapping[str, Any], *, tolerance: float = 1e-10) -> 
                 )
             )
 
-    # Carino linking for asset-class effects ---------------------------------
+    # Carino linking: asset-class BHB, else stock-industry BF -----------------
     linked_frame = pd.DataFrame()
     brinson_return_basis = "not_available"
-    if not asset_frame.empty:
-        asset_effects = (
-            asset_frame.groupby("period", sort=False)[["allocation", "selection"]].sum().reset_index()
+    brinson_effect_source = "none"
+    effect_source = asset_frame if not asset_frame.empty else industry_frame
+    if not effect_source.empty:
+        brinson_effect_source = "asset_class" if not asset_frame.empty else "industry"
+        totals_basis = (
+            "asset_class_input_fallback"
+            if brinson_effect_source == "asset_class"
+            else "industry_input_fallback"
         )
-        if not periods_frame.empty and periods_frame["holding_return"].notna().all():
-            linking_returns = periods_frame[
-                ["period", "holding_return", "benchmark_holding_return"]
-            ].rename(
-                columns={
-                    "holding_return": "portfolio_return",
-                    "benchmark_holding_return": "benchmark_return",
-                }
+        try:
+            linked_frame, brinson_return_basis, link_warnings = link_brinson_effects(
+                effect_source,
+                periods_frame,
+                tolerance=tolerance,
+                totals=effect_source.attrs.get("totals", []),
+                totals_basis=totals_basis,
             )
-            brinson_return_basis = "holding_return"
-        else:
-            linking_returns = periods_frame[
-                ["period", "portfolio_return", "benchmark_return"]
-            ] if not periods_frame.empty else periods_frame
-            brinson_return_basis = "total_return_fallback"
-            if not periods_frame.empty:
-                quality_warnings.append(
-                    warning(
-                        "brinson_total_return_fallback",
-                        "Holding return is unavailable (usually because beginning NAV is missing); Brinson/Carino linking fell back to total portfolio return.",
-                        severity="info",
-                        scope="linking",
-                    )
-                )
-        if linking_returns.empty:
-            totals = asset_frame.attrs.get("totals", [])
-            if totals:
-                linking_returns = pd.DataFrame(totals)[
-                    ["period", "portfolio_return", "benchmark_return"]
-                ]
-                brinson_return_basis = "asset_class_input_fallback"
-        if not linking_returns.empty:
-            try:
-                linked_frame = carino_link(
-                    linking_returns,
-                    asset_effects,
-                    effect_columns=["allocation", "selection"],
-                    tolerance=tolerance,
-                    enforce_reconciliation=True,
-                )
+            quality_warnings.extend(link_warnings)
+            if not linked_frame.empty:
                 _collect_frame_metadata(linked_frame, quality_warnings, reconciliations)
                 section = _section(
                     "linked",
                     "多期链接归因",
                     "Carino logarithmic linking",
                     linked_frame,
-                    note=f"Return basis: {brinson_return_basis}",
+                    note=f"Return basis: {brinson_return_basis}; effects: {brinson_effect_source}",
                 )
                 sections["linked"] = section
                 tables.append(section)
-            except (ValueError, TypeError, KeyError) as exc:
-                quality_warnings.append(warning("invalid_carino_linking", str(exc), scope="linking"))
+        except (ValueError, TypeError, KeyError) as exc:
+            quality_warnings.append(warning("invalid_carino_linking", str(exc), scope="linking"))
 
     # Summary -----------------------------------------------------------------
     if not periods_frame.empty:
@@ -610,13 +585,17 @@ def run_attribution(payload: Mapping[str, Any], *, tolerance: float = 1e-10) -> 
         attribution_total = float(asset_frame["total_effect"].sum())
         allocation_total = float(asset_frame["allocation"].sum())
         selection_total = float(asset_frame["selection"].sum())
+    elif not industry_frame.empty:
+        attribution_total = float(industry_frame["total_effect"].sum())
+        allocation_total = float(industry_frame["allocation"].sum())
+        selection_total = float(industry_frame["selection"].sum())
     else:
         attribution_total = 0.0
         allocation_total = 0.0
         selection_total = 0.0
     attribution_gap = (
         holding_active_total - attribution_total
-        if (not asset_frame.empty or not linked_frame.empty)
+        if (not asset_frame.empty or not industry_frame.empty or not linked_frame.empty)
         else None
     )
 
@@ -636,11 +615,7 @@ def run_attribution(payload: Mapping[str, Any], *, tolerance: float = 1e-10) -> 
         trade_path = periods_frame["trade_return"].to_numpy(dtype=float)
         holding_path = periods_frame["holding_return"].to_numpy(dtype=float)
         leverage_path = periods_frame["leverage_return"].to_numpy(dtype=float)
-        growth_after = np.ones(len(periods_frame), dtype=float)
-        subsequent_growth = 1.0
-        for index in range(len(periods_frame) - 1, -1, -1):
-            growth_after[index] = subsequent_growth
-            subsequent_growth *= 1.0 + portfolio_path[index]
+        growth_after = subsequent_growth(portfolio_path)
         linked_trade_return = float(np.sum(trade_path * growth_after))
         linked_holding_return = float(np.sum(holding_path * growth_after))
         linked_leverage_return: Optional[float] = float(np.sum(leverage_path * growth_after))
@@ -734,6 +709,7 @@ def run_attribution(payload: Mapping[str, Any], *, tolerance: float = 1e-10) -> 
                 "stock_industry": "Brinson-Fachler no-interaction",
                 "multi_period": "Carino",
                 "return_basis": brinson_return_basis,
+                "allocation_selection": brinson_effect_source,
             },
             "units": {
                 "return_and_contribution": RETURN_UNIT,

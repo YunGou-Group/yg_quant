@@ -246,6 +246,101 @@ def test_factor_payload_feeds_brison_engine():
     assert "missing_factor_data" not in codes
 
 
+def test_web_view_fills_tree_from_industry_when_summary_effects_are_zero():
+    from StrategyEngine.attribution.evaluate import web_view
+
+    view = web_view(
+        {
+            "run_id": "demo",
+            "attribution": {
+                "status": "ok",
+                "summary": {
+                    "portfolio_return": 0.076,
+                    "benchmark_return": 0.055,
+                    "holding_active_return": 0.021,
+                    "allocation_effect": 0.0,
+                    "selection_effect": 0.0,
+                },
+                "periods": [
+                    {
+                        "period": "P1",
+                        "holding_return": 0.076,
+                        "benchmark_holding_return": 0.055,
+                        "portfolio_return": 0.076,
+                        "benchmark_return": 0.055,
+                    }
+                ],
+                "sections": {
+                    "industry": {
+                        "title": "行业",
+                        "rows": [
+                            {
+                                "period": "P1",
+                                "industry": "A",
+                                "allocation": 0.005,
+                                "selection": 0.014,
+                                "total_effect": 0.019,
+                            },
+                            {
+                                "period": "P1",
+                                "industry": "B",
+                                "allocation": 0.005,
+                                "selection": -0.003,
+                                "total_effect": 0.002,
+                            },
+                        ],
+                    },
+                    "factor": {"rows": []},
+                },
+            },
+        }
+    )
+    tree = {row["label"]: row["value"] for row in view["returns_tree"]}
+    assert abs(tree["股票配置收益"] - 0.010) < 1e-12
+    assert abs(tree["股票选择收益"] - 0.011) < 1e-12
+    assert abs(view["summary"]["allocation_effect"] - 0.010) < 1e-12
+
+
+def test_returns_tree_children_sum_to_parents():
+    from StrategyEngine.attribution.tree import returns_tree
+
+    tree = returns_tree(
+        {},
+        periods=[
+            {
+                "period": "P1",
+                "portfolio_return": 0.10,
+                "trade_return": 0.02,
+                "holding_return": 0.08,
+                "leverage_return": 0.0,
+                "benchmark_return": 0.05,
+                "benchmark_holding_return": 0.05,
+            },
+            {
+                "period": "P2",
+                "portfolio_return": 0.20,
+                "trade_return": 0.05,
+                "holding_return": 0.15,
+                "leverage_return": 0.0,
+                "benchmark_return": 0.10,
+                "benchmark_holding_return": 0.10,
+            },
+        ],
+        effect_rows=[
+            {"period": "P1", "industry": "A", "allocation": 0.01, "selection": 0.02},
+            {"period": "P2", "industry": "A", "allocation": 0.02, "selection": 0.03},
+        ],
+    )
+    values = {row["label"]: row["value"] for row in tree}
+    assert abs(values["总收益"] - (values["交易收益"] + values["杠杆收益"] + values["持仓收益"])) < 1e-12
+    assert abs(values["持仓收益"] - (values["主动收益"] + values["基准持仓收益"])) < 1e-12
+    assert abs(
+        values["主动收益"]
+        - (values["股票配置收益"] + values["股票选择收益"] + values["归因残差"])
+    ) < 1e-12
+    assert abs(values["基准持仓收益"] - (values["基准收益"] + values["穿透效应"])) < 1e-12
+
+
 def test_onion_tree_matches_rqpattr_levels():
     from StrategyEngine.attribution.tree import returns_tree
 
@@ -272,6 +367,7 @@ def test_onion_tree_matches_rqpattr_levels():
         "主动收益",
         "股票配置收益",
         "股票选择收益",
+        "归因残差",
         "基准持仓收益",
         "基准收益",
         "穿透效应",
