@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from DailyUpdates.data_fetcher.data_fetcher import source_class_for_config
 from DailyUpdates.data_fetcher.data_source_base import FetchSlice
-from DailyUpdates.preprocessing.market_bars import load_prev_adj
+from DailyUpdates.data_fetcher.preprocessing.market_bars import load_prev_adj
 
 SIDECAR_DATA_TYPES = {"industry", "stock_info", "financial", "index_constituent"}
 _TRUNCATED_BY_DATE_APIS = {"stk_limit", "daily_basic", "adj_factor"}

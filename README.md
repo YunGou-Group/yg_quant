@@ -28,7 +28,7 @@ Python 3.10–3.12。MIT，见 [LICENSE](LICENSE)。
 
 ## 目录
 
-| 包 | 做什么 |
+| 包 | 功能 |
 |----|--------|
 | `DailyUpdates` | 行情入库、因子增量 |
 | `FactorEvaluates` | 因子评估 |

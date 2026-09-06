@@ -248,6 +248,57 @@ class ProcessorMergeTests(unittest.TestCase):
         dates = set(pd.to_datetime(missing["date"]).dt.strftime("%Y-%m-%d"))
         self.assertEqual(dates, {"2020-01-02", "2020-01-03"})
 
+    def test_stock_union_ignores_config_order(self):
+        processor = DataProcessor()
+        daily = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20200102"],
+                "close": [10.0],
+            }
+        )
+        basic = pd.DataFrame(
+            {
+                "ts_code": ["600000.SH"],
+                "trade_date": ["20200102"],
+                "pe_ttm": [8.0],
+            }
+        )
+        config = {
+            "daily": {
+                "data_type": "daily",
+                "fields": ["ts_code", "trade_date", "close"],
+            },
+            "daily_basic": {
+                "data_type": "daily",
+                "fields": ["ts_code", "trade_date", "pe_ttm"],
+            },
+        }
+        fields = {"close", "pe_ttm"}
+        daily_first = processor.build_panel(
+            {"daily": daily, "daily_basic": basic},
+            config,
+            "20200102",
+            set(),
+            fields,
+        )
+        basic_first = processor.build_panel(
+            {"daily_basic": basic, "daily": daily},
+            config,
+            "20200102",
+            set(),
+            fields,
+        )
+        for out in (daily_first, basic_first):
+            symbols = set(out["symbol"].astype(str))
+            self.assertEqual(symbols, {"SZ000001", "SH600000"})
+            ping = out.loc[out["symbol"] == "SZ000001"].iloc[0]
+            pufa = out.loc[out["symbol"] == "SH600000"].iloc[0]
+            self.assertAlmostEqual(float(ping["close"]), 10.0)
+            self.assertTrue(pd.isna(ping["pe_ttm"]))
+            self.assertAlmostEqual(float(pufa["pe_ttm"]), 8.0)
+            self.assertTrue(pd.isna(pufa["close"]))
+
 
 class InstallerCoverageTests(unittest.TestCase):
     def setUp(self) -> None:

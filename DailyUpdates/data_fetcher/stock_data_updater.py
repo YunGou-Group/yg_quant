@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 from DailyUpdates.data_fetcher.data_fetcher import DataFetcher, market_uses_range_window
 from DailyUpdates.data_fetcher.data_processor import DataProcessor
-from DailyUpdates.preprocessing.market_bars import load_prev_adj
+from DailyUpdates.data_fetcher.preprocessing.market_bars import load_prev_adj
 from DailyUpdates.data_fetcher.dataset_installer import DatasetInstaller, is_sidecar_dataset
 from DailyUpdates.storage import SQLiteStorage
 
@@ -57,6 +57,7 @@ class StockDataUpdater:
             self.pro = ts.pro_api()
         self.data_fetcher = DataFetcher(tushare_pro=self.pro, storage=self.storage)
         self.data_processor = DataProcessor()
+        self._refresh_limit_context()
         self.dataset_installer = DatasetInstaller(
             self.storage, self.data_fetcher, self.data_processor
         )
@@ -84,6 +85,40 @@ class StockDataUpdater:
             }
         }
         logger.info(f"更新器初始化完成，SQLite 数据库: {self.db_path}")
+
+    def _refresh_limit_context(self) -> None:
+        """给预处理补涨跌停用：PIT 名称（ST）、上市日、交易日历。"""
+        namechange = None
+        list_dates = None
+        calendar = None
+        try:
+            frame = self.storage.read_stock_namechange()
+            if frame is not None and not frame.empty:
+                namechange = frame
+        except Exception:
+            logger.debug("读取 namechange 失败，补涨跌停时不按 ST 处理", exc_info=True)
+        try:
+            basic = self.storage.read_stock_basic()
+            if (
+                basic is not None
+                and not basic.empty
+                and "list_date" in basic.columns
+                and "symbol" in basic.columns
+            ):
+                listed = pd.to_datetime(
+                    basic.drop_duplicates("symbol").set_index("symbol")["list_date"],
+                    errors="coerce",
+                )
+                list_dates = listed[listed.notna()]
+        except Exception:
+            logger.debug("读取 stock_basic 失败，无法识别上市初期不设限", exc_info=True)
+        try:
+            days = self.storage.list_trade_dates()
+            if days:
+                calendar = days
+        except Exception:
+            logger.debug("读取交易日历失败，上市初期按自然日近似", exc_info=True)
+        self.data_processor.set_limit_context(namechange, list_dates, calendar)
 
     def _split_configs(self) -> tuple:
         market = {}
@@ -118,6 +153,7 @@ class StockDataUpdater:
                 failed.append(name)
         if failed:
             raise RuntimeError(f"sidecar 数据集更新失败: {failed}")
+        self._refresh_limit_context()
         return True
 
     def get_current_stock_codes(self) -> Set[str]:

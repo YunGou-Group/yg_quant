@@ -7,16 +7,37 @@ from typing import Dict, Mapping, Optional, Set
 import numpy as np
 import pandas as pd
 
-from DailyUpdates.preprocessing.market_bars import sanitize_market_bars
+from DailyUpdates.data_fetcher.preprocessing.market_bars import sanitize_market_bars
 
 
 class DataProcessor:
     """标准化代码/日期，再按 (symbol, date) 合并并补齐缺失股票与字段。"""
 
+    def __init__(self):
+        self.namechange: Optional[pd.DataFrame] = None
+        self.list_dates: Optional[pd.Series] = None
+        self.calendar = None
+
+    def set_limit_context(
+        self,
+        namechange: Optional[pd.DataFrame] = None,
+        list_dates: Optional[pd.Series] = None,
+        calendar=None,
+    ) -> None:
+        self.namechange = namechange
+        self.list_dates = list_dates
+        self.calendar = calendar
+
     def sanitize_frame(
         self, frame: pd.DataFrame, *, prev_adj: Optional[pd.Series] = None
     ) -> pd.DataFrame:
-        return sanitize_market_bars(frame, prev_adj=prev_adj)
+        return sanitize_market_bars(
+            frame,
+            prev_adj=prev_adj,
+            namechange=self.namechange,
+            list_dates=self.list_dates,
+            calendar=self.calendar,
+        )
 
     def normalize_dataframe(
         self,
@@ -73,7 +94,7 @@ class DataProcessor:
         current_stocks: set,
         all_fields: set,
     ) -> pd.DataFrame:
-        """合并所有数据集并填充缺失值。"""
+        """按 (symbol, date) 并集合并所有数据集，再补齐缺失股票与字段。"""
         if not dataset_dfs:
             return pd.DataFrame()
 
@@ -91,44 +112,11 @@ class DataProcessor:
                 stock_datasets[dataset_name] = df
                 print(f"数据集 {dataset_name} 识别为股票数据")
 
-        result_df = pd.DataFrame()
-        if stock_datasets:
-            base_dataset = next(iter(stock_datasets))
-            result_df = stock_datasets[base_dataset].copy()
-            for dataset_name, df in stock_datasets.items():
-                if dataset_name == base_dataset:
-                    continue
-                merge_keys = _merge_keys(result_df, df)
-                if not merge_keys:
-                    print(f"警告：数据集 {dataset_name} 无法确定合并键，跳过合并")
-                    continue
-                print(f"合并股票数据集 {dataset_name}，使用合并键: {merge_keys}")
-                result_df = pd.merge(
-                    result_df, df, on=merge_keys, how="left", suffixes=("", f"_{dataset_name}")
-                )
-                print(f"合并数据集 {dataset_name}，结果行数: {len(result_df)}")
-
+        result_df = _outer_merge_frames(stock_datasets)
         if index_datasets:
             print("处理指数数据，先合并内部数据集...")
-            merged_index_df = None
-            for dataset_name, df in index_datasets.items():
-                if merged_index_df is None:
-                    merged_index_df = df.copy()
-                    continue
-                merge_keys = _merge_keys(merged_index_df, df)
-                if merge_keys:
-                    print(f"合并指数数据集 {dataset_name}，使用合并键: {merge_keys}")
-                    merged_index_df = pd.merge(
-                        merged_index_df,
-                        df,
-                        on=merge_keys,
-                        how="outer",
-                        suffixes=("", f"_{dataset_name}"),
-                    )
-                    print(f"合并指数数据集 {dataset_name}，结果行数: {len(merged_index_df)}")
-                else:
-                    print(f"警告：指数数据集 {dataset_name} 无法确定合并键，跳过合并")
-            if merged_index_df is not None:
+            merged_index_df = _outer_merge_frames(index_datasets)
+            if merged_index_df is not None and not merged_index_df.empty:
                 print(f"将合并后的指数数据追加到结果中，指数数据行数: {len(merged_index_df)}")
                 result_df = pd.concat([result_df, merged_index_df], ignore_index=True)
                 print(f"指数数据已追加，总结果行数: {len(result_df)}")
@@ -204,6 +192,29 @@ class DataProcessor:
         print(result_df)
         print(f"合并后获取到 {len(result_df)} 条记录，字段: {list(result_df.columns)}")
         return result_df
+
+
+def _outer_merge_frames(frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """按 (symbol, date) 做并集。配置顺序不影响留下哪些主键行。"""
+    merged = None
+    for dataset_name, frame in frames.items():
+        if merged is None:
+            merged = frame.copy()
+            continue
+        merge_keys = _merge_keys(merged, frame)
+        if not merge_keys:
+            print(f"警告：数据集 {dataset_name} 无法确定合并键，跳过合并")
+            continue
+        print(f"合并数据集 {dataset_name}，使用合并键: {merge_keys}")
+        merged = pd.merge(
+            merged,
+            frame,
+            on=merge_keys,
+            how="outer",
+            suffixes=("", f"_{dataset_name}"),
+        )
+        print(f"合并数据集 {dataset_name}，结果行数: {len(merged)}")
+    return merged if merged is not None else pd.DataFrame()
 
 
 def _is_index_frame(frame: pd.DataFrame) -> bool:
