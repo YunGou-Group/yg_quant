@@ -361,16 +361,27 @@ class DatasetInstaller:
                     )
                     return False
                 if miss_data is None or miss_data.empty:
-                    logger.error(
-                        f"数据集 {dataset_name} 缺失指数 {missing} 未获取到数据"
+                    optional = {
+                        str(code)
+                        for code in (dataset_config.get("optional_index_codes") or [])
+                    }
+                    if missing and set(missing) <= optional:
+                        logger.warning(
+                            "缺失指数 %s 为 optional 且源无成分，跳过回填",
+                            missing,
+                        )
+                    else:
+                        logger.error(
+                            f"数据集 {dataset_name} 缺失指数 {missing} 未获取到数据"
+                        )
+                        return False
+                else:
+                    written = self.storage.upsert_index_constituents(miss_data)
+                    if written <= 0:
+                        return False
+                    logger.info(
+                        f"缺失指数 {missing} 已回填 {written} 行，继续增量 {start}->{end}"
                     )
-                    return False
-                written = self.storage.upsert_index_constituents(miss_data)
-                if written <= 0:
-                    return False
-                logger.info(
-                    f"缺失指数 {missing} 已回填 {written} 行，继续增量 {start}->{end}"
-                )
 
         logger.info(
             f"{'全量' if write_mode == 'full' else '增量'}更新 sidecar "

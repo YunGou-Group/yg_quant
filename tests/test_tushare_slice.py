@@ -300,6 +300,64 @@ def test_index_member_omitted_is_new_fetches_both_flags(monkeypatch):
     assert len(out) == 1
 
 
+def test_index_weight_optional_empty_keeps_other_indexes(monkeypatch):
+    src = _index_src(monkeypatch)
+
+    def fake_call(getter, paras, fields=None):
+        code = paras["index_code"]
+        if code in {"000016.SH", "399300.SZ", "000905.SH"}:
+            return pd.DataFrame(
+                {
+                    "index_code": [code],
+                    "con_code": ["000001.SZ"],
+                    "trade_date": [paras["start_date"]],
+                    "weight": [1.0],
+                }
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(src, "_call_api", fake_call)
+    out = src._fetch_index_weight(
+        {
+            "index_list": ["000016.SH", "000985.SH"],
+            "optional_index_codes": ["000985.SH"],
+            "pause_seconds": 0,
+        },
+        ["index_code", "con_code", "trade_date", "weight"],
+        "20200101",
+        "20200131",
+    )
+    assert not out.empty
+    assert set(out["index_code"]) == {"000016.SH"}
+
+
+def test_index_weight_resolves_csi_all_share_alias(monkeypatch):
+    src = _index_src(monkeypatch)
+
+    def fake_call(getter, paras, fields=None):
+        code = paras["index_code"]
+        if code in {"000016.SH", "399300.SZ", "000905.SH", "000985.CSI"}:
+            return pd.DataFrame(
+                {
+                    "index_code": [code],
+                    "con_code": ["000001.SZ"],
+                    "trade_date": [paras["start_date"]],
+                    "weight": [1.0],
+                }
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(src, "_call_api", fake_call)
+    out = src._fetch_index_weight(
+        {"index_list": ["000985.SH"], "pause_seconds": 0},
+        ["index_code", "con_code", "trade_date", "weight"],
+        "20200101",
+        "20200131",
+    )
+    assert not out.empty
+    assert (out["index_code"] == "000985.SH").all()
+
+
 def test_index_weight_partial_empty_fails(monkeypatch):
     src = _index_src(monkeypatch)
 

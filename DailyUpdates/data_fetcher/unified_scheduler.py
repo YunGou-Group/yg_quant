@@ -77,6 +77,7 @@ def _sidecar_snapshot(config: Dict) -> Dict:
         "use_vip",
         "periods",
         "index_list",
+        "optional_index_codes",
         "fields",
         "primary_key",
         "pause_seconds",

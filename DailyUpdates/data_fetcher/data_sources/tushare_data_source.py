@@ -13,10 +13,12 @@ from tqdm import tqdm
 from DailyUpdates.data_fetcher.data_source_base import DataSourceBase, FetchSlice
 from DailyUpdates.storage.financial_schema import FINANCIAL_TUSHARE_FIELDS
 
-# index_weight 对部分上交所代码返回空表，要用深交所镜像请求，写入仍用配置里的代码。
-# https://github.com/waditu/tushare/issues/801
+# index_weight 请求代码与配置代码可以不同，写入仍用配置里的代码。
+# 000300.SH → 399300.SZ：https://github.com/waditu/tushare/issues/801
+# 000985.SH → 000985.CSI：index_basic(market=CSI)；.SH / 399985.SZ 无成分。
 INDEX_WEIGHT_CODE_ALIAS = {
     "000300.SH": "399300.SZ",
+    "000985.SH": "000985.CSI",
 }
 INDEX_WEIGHT_PROBE_CODES = ("000016.SH", "399300.SZ", "000905.SH")
 
@@ -503,6 +505,33 @@ class TushareDataSource(DataSourceBase):
             "weight",
         ]
         self._assert_index_weight_available(field_list, end_date)
+        probe_start, probe_end = self._index_weight_probe_window(end_date)
+        optional = {
+            str(code).strip()
+            for code in (config.get("optional_index_codes") or [])
+        }
+        request_by_config: Dict[str, str] = {}
+        unavailable: List[str] = []
+        for index_code in index_list:
+            resolved = self._resolve_index_weight_request_code(
+                str(index_code), field_list, probe_start, probe_end
+            )
+            if resolved is None:
+                unavailable.append(str(index_code))
+            else:
+                request_by_config[str(index_code)] = resolved
+        required_empty = [code for code in unavailable if code not in optional]
+        if required_empty:
+            raise RuntimeError(
+                f"index_weight 以下指数全程 0 行: {required_empty}。"
+                "接口无权限或代码无效时通常不报错、只给空表；"
+                "其它指数已有数据时不能把缺表当成成功。"
+            )
+        for code in unavailable:
+            print(
+                f"[index_constituent] {code} 跳过（optional，探测 {probe_start}~{probe_end} 无成分）",
+                flush=True,
+            )
         # 按月切片，避免单次过大
         month_starts = pd.date_range(
             pd.Timestamp(start_date).replace(day=1),
@@ -510,11 +539,11 @@ class TushareDataSource(DataSourceBase):
             freq="MS",
         )
         frames = []
-        hits: Dict[str, int] = {str(code): 0 for code in index_list}
-        tasks = [(code, month) for code in index_list for month in month_starts]
+        hits: Dict[str, int] = {str(code): 0 for code in request_by_config}
+        tasks = [(code, month) for code in request_by_config for month in month_starts]
         print(
             f"[index_constituent] 拉取 index_weight: "
-            f"{len(index_list)} 指数 x {len(month_starts)} 月 = {len(tasks)} 次",
+            f"{len(request_by_config)} 指数 x {len(month_starts)} 月 = {len(tasks)} 次",
             flush=True,
         )
         pause = float(config.get("pause_seconds", 0.2))
@@ -526,7 +555,7 @@ class TushareDataSource(DataSourceBase):
                 month_start = start_date
             if month_end > end_date:
                 month_end = end_date
-            request_code = self._index_weight_request_code(index_code)
+            request_code = request_by_config[index_code]
             progress.set_postfix_str(f"{index_code} {month_start}")
             part = self._call_api(
                 self.pro.index_weight,
@@ -545,7 +574,7 @@ class TushareDataSource(DataSourceBase):
                 hits[str(index_code)] += len(part)
             time.sleep(pause)
         for code, rows in hits.items():
-            req = self._index_weight_request_code(code)
+            req = request_by_config[code]
             alias = "" if req == code else f"（请求 {req}）"
             print(f"[index_constituent] {code}{alias} -> {rows} 行", flush=True)
         if not frames:
@@ -596,10 +625,49 @@ class TushareDataSource(DataSourceBase):
         last_month_start = last_month_end.replace(day=1)
         return last_month_start.strftime("%Y%m%d"), last_month_end.strftime("%Y%m%d")
 
+    @classmethod
+    def _index_weight_candidates(cls, code: str) -> List[str]:
+        key = str(code).strip().upper()
+        raw = str(code).strip()
+        seen: List[str] = []
+        alias = INDEX_WEIGHT_CODE_ALIAS.get(key)
+        if alias:
+            seen.append(alias)
+        if raw not in seen:
+            seen.append(raw)
+        return seen
+
     @staticmethod
     def _index_weight_request_code(code: str) -> str:
-        key = str(code).strip().upper()
-        return INDEX_WEIGHT_CODE_ALIAS.get(key, str(code).strip())
+        return TushareDataSource._index_weight_candidates(code)[0]
+
+    def _resolve_index_weight_request_code(
+        self,
+        index_code: str,
+        field_list: List[str],
+        probe_start: str,
+        probe_end: str,
+    ) -> Optional[str]:
+        """用上一个完整自然月探测镜像代码；全空则返回 None，避免空指数再扫 200 个月。"""
+        for candidate in self._index_weight_candidates(index_code):
+            part = self._call_api(
+                self.pro.index_weight,
+                {
+                    "index_code": candidate,
+                    "start_date": probe_start,
+                    "end_date": probe_end,
+                },
+                field_list,
+            )
+            rows = 0 if part is None or part.empty else len(part)
+            print(
+                f"[index_constituent] 解析 {index_code} -> {candidate} "
+                f"{probe_start}~{probe_end} -> {rows} 行",
+                flush=True,
+            )
+            if rows:
+                return candidate
+        return None
 
     @staticmethod
     def _index_weight_empty_message(start: str, end: str) -> str:
