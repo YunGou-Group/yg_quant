@@ -46,3 +46,4 @@ desktop.ini
 # 本地参考 dump（HTML、Next 壳、optimize 草稿等），不进仓
 doc/
 scripts/
+tests/
