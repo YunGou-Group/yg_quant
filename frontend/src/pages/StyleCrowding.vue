@@ -262,8 +262,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.page { padding: 1rem 1.25rem; max-width: 1200px; }
-.head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.page { max-width: none; }
+.head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
 .muted { color: var(--muted); font-size: 0.9rem; }
 .err { color: var(--bad); }
 .tabs { display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap; }

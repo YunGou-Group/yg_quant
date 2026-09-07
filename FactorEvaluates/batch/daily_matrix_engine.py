@@ -154,8 +154,29 @@ class DailyMatrixEngine:
             self._pool_workers = 0
             self._panel_worker_spec = None
         if self._panel_pack is not None:
+            # 日度阶段把 store.mask/fwd/... 改挂到 shm 视图；unlink 前必须拷回，
+            # 否则跨批相关等后续步骤读 store 会踩已释放内存（Windows 常无 traceback、exit 1）。
+            self._detach_store_from_shm()
             self._panel_pack.close_and_unlink()
             self._panel_pack = None
+
+    def _detach_store_from_shm(self) -> None:
+        """把仍需要的轴从 shm 视图拷回私有数组，并丢掉日度专用大面板。"""
+        pack = self._panel_pack
+        if pack is None:
+            return
+        mask_item = pack.items.get("mask")
+        if mask_item is not None:
+            self.store.mask = np.array(mask_item.array, copy=True, dtype=bool)
+        # 跨批相关 / 写盘不再需要收益与风格面板
+        self.store.fwd = {}
+        self.store.style.clear()
+        self.store.x_t = None
+        self.store.x_names = []
+        self._style = None
+        self._fwd_decay = None
+        self._decay_h = ()
+        self.store.open = np.empty((0, 0), dtype=np.float32)
 
     def _ensure_pool(self, workers: int, panel: ShmPack):
         spec = self._panel_worker_spec
@@ -227,13 +248,26 @@ class DailyMatrixEngine:
             return self._panel_pack
         pack = ShmPack()
         pack.add("mask", ShmArray.create(self.store.mask))
+        self.store.mask = pack.items["mask"].array
         pack.add("fwd", ShmArray.create(self.store.fwd[int(self.store.horizon)]))
+        # 主进程改挂 shm 视图，丢掉私有副本；worker 只读这份
+        keep_fwd = {int(self.store.horizon): pack.items["fwd"].array}
         if self._fwd_decay is not None:
             pack.add("fwd_decay", ShmArray.create(self._fwd_decay))
+            self._fwd_decay = pack.items["fwd_decay"].array
+            for i, n in enumerate(self._decay_h):
+                keep_fwd[int(n)] = self._fwd_decay[i]
+        self.store.fwd = keep_fwd
         if self._style is not None:
             pack.add("style", ShmArray.create(self._style))
+            self._style = pack.items["style"].array
+            # 日度路径只用 style 栈；释放按名拆开的重复面板
+            self.store.style.clear()
         if self.store.x_t is not None:
             pack.add("x_t", ShmArray.create(self.store.x_t))
+            self.store.x_t = pack.items["x_t"].array
+        # open 面板评估日度不再需要
+        self.store.open = np.empty((0, 0), dtype=np.float32)
         self._panel_pack = pack
         return pack
 
@@ -279,6 +313,10 @@ class DailyMatrixEngine:
 
     def _decay_stack(self) -> Tuple[Optional[np.ndarray], Tuple[int, ...]]:
         if not any(m.get_name() == "ic_decay" for m in self.metrics):
+            # 只要主 horizon，丢掉其余远期面板
+            h = int(self.store.horizon)
+            if h in self.store.fwd:
+                self.store.fwd = {h: self.store.fwd[h]}
             return None, ()
         hs = tuple(int(n) for n in DECAY_HORIZONS if int(n) in self.store.fwd)
         if not hs:

@@ -699,10 +699,9 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.page { padding: 20px 24px 40px; }
-.hero { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+.hero { display: flex; justify-content: space-between; gap: 16px; align-items: start; flex-wrap: wrap; }
 .actions { display: flex; gap: 8px; flex-shrink: 0; }
-h1 { margin: 0 0 6px; font-size: 22px; }
+h1 { margin: 0 0 6px; font-size: clamp(22px, 2.4vw, 28px); }
 h2 { margin: 20px 0 10px; font-size: 14px; color: var(--muted); font-weight: 600; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0 8px; }
 .check {
@@ -715,16 +714,14 @@ h2 { margin: 20px 0 10px; font-size: 14px; color: var(--muted); font-weight: 600
 }
 .more { margin: 8px 0 12px; color: var(--muted); }
 .more summary { cursor: pointer; }
-.kpis { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0 16px; }
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 12px 16px;
-  min-width: 120px;
+  padding: 16px 20px;
 }
 .label { color: var(--muted); font-size: 12px; }
-.value { font-size: 20px; font-weight: 600; }
+.value { font-size: clamp(20px, 2.2vw, 28px); font-weight: 600; }
 .runs { display: flex; flex-direction: column; gap: 6px; margin-top: 20px; }
 .run {
   text-align: left;
@@ -747,6 +744,10 @@ h2 { margin: 20px 0 10px; font-size: 14px; color: var(--muted); font-weight: 600
 .split :deep(.panel) { height: 100%; }
 @media (max-width: 1100px) {
   .split-factor { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .actions { width: 100%; }
+  .actions button { flex: 1; }
 }
 .flow-panel,
 .tree-panel {

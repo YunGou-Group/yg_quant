@@ -1,10 +1,18 @@
 <script setup>
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import { provideRunWorkspace } from "../runWorkspace.js";
 
 const route = useRoute();
 const { datasets, runId, runLabel, runLink, setRun } = provideRunWorkspace();
+const navOpen = ref(false);
+
+watch(
+  () => route.fullPath,
+  () => {
+    navOpen.value = false;
+  }
+);
 
 const isHome = computed(() => route.path === "/");
 const isBacktest = computed(() => route.path.startsWith("/backtest"));
@@ -43,7 +51,16 @@ function factorActive(item) {
   <div class="shell">
     <header class="top">
       <RouterLink to="/" class="brand">yg_quant</RouterLink>
-      <nav>
+      <button
+        class="menu"
+        type="button"
+        :aria-expanded="navOpen"
+        aria-label="打开导航"
+        @click="navOpen = !navOpen"
+      >
+        <span /><span /><span />
+      </button>
+      <nav :class="{ open: navOpen }">
         <RouterLink
           v-for="item in modules"
           :key="item.key"
@@ -92,12 +109,29 @@ function factorActive(item) {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 0 20px;
-  min-height: 64px;
+  padding: 0 var(--page-pad-x);
+  min-height: var(--header-h);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   flex-shrink: 0;
   flex-wrap: wrap;
+}
+.menu {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  margin-left: auto;
+  background: transparent;
+}
+.menu span {
+  display: block;
+  height: 2px;
+  background: var(--text);
+  border-radius: 1px;
 }
 .brand {
   font-weight: 700;
@@ -146,5 +180,31 @@ nav {
   min-height: 0;
   overflow: auto;
   height: 100%;
+}
+@media (max-width: 900px) {
+  .menu {
+    display: inline-flex;
+  }
+  nav {
+    display: none;
+    flex-basis: 100%;
+    order: 4;
+    padding: 0 0 10px;
+  }
+  nav.open {
+    display: flex;
+  }
+  .nav-split {
+    display: none;
+  }
+  .run-pick {
+    flex-basis: 100%;
+    order: 5;
+    padding-bottom: 10px;
+  }
+  .run-pick select {
+    max-width: none;
+    flex: 1;
+  }
 }
 </style>

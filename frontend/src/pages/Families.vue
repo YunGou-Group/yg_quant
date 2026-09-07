@@ -40,61 +40,66 @@ watch(runId, load);
     <h1>因子家族</h1>
     <p class="meta">alphaNNN 归入 alpha101，style_* 归入 barra，其余按前缀。按 RankIC IR 排序。</p>
     <p v-if="error" class="status error">{{ error }}</p>
-    <table>
-      <thead>
-        <tr>
-          <th>家族</th>
-          <th>成员</th>
-          <th>RankIC IR</th>
-          <th>RankIC</th>
-          <th>覆盖率</th>
-          <th>最佳</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr
-          v-for="item in items"
-          :key="item.family"
-          :class="{ open: open?.family === item.family }"
-          @click="open = item"
-        >
-          <td>{{ item.family }}</td>
-          <td>{{ item.n }}</td>
-          <td>{{ fmt(item.rank_ic_ir_mean) }}</td>
-          <td>{{ fmt(item.rank_ic_mean) }}</td>
-          <td>{{ fmt(item.coverage_rate_mean) }}</td>
-          <td>{{ item.best_member || "—" }}</td>
-        </tr>
-      </tbody>
-    </table>
-    <div v-if="open" class="drawer">
-      <h2>{{ open.family }}</h2>
+    <div class="table-scroll">
       <table>
         <thead>
           <tr>
-            <th>因子</th>
+            <th>家族</th>
+            <th>成员</th>
             <th>RankIC IR</th>
             <th>RankIC</th>
             <th>覆盖率</th>
+            <th>最佳</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in open.members" :key="row.factor_name" @click="openMember(row.factor_name)">
-            <td>{{ row.factor_name }}</td>
-            <td>{{ fmt(row.rank_ic_ir) }}</td>
-            <td>{{ fmt(row.rank_ic_mean) }}</td>
-            <td>{{ fmt(row.coverage_rate_mean) }}</td>
+          <tr
+            v-for="item in items"
+            :key="item.family"
+            :class="{ open: open?.family === item.family }"
+            @click="open = item"
+          >
+            <td>{{ item.family }}</td>
+            <td>{{ item.n }}</td>
+            <td>{{ fmt(item.rank_ic_ir_mean) }}</td>
+            <td>{{ fmt(item.rank_ic_mean) }}</td>
+            <td>{{ fmt(item.coverage_rate_mean) }}</td>
+            <td>{{ item.best_member || "—" }}</td>
           </tr>
         </tbody>
       </table>
+    </div>
+    <div v-if="open" class="drawer">
+      <h2>{{ open.family }}</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>因子</th>
+              <th>RankIC IR</th>
+              <th>RankIC</th>
+              <th>覆盖率</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in open.members" :key="row.factor_name" @click="openMember(row.factor_name)">
+              <td>{{ row.factor_name }}</td>
+              <td>{{ fmt(row.rank_ic_ir) }}</td>
+              <td>{{ fmt(row.rank_ic_mean) }}</td>
+              <td>{{ fmt(row.coverage_rate_mean) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.page { padding: 20px 24px; }
+h1 { font-size: clamp(22px, 2.4vw, 28px); }
+.table-scroll { border: none; }
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; }
 tbody tr { cursor: pointer; }
 tbody tr:hover, tbody tr.open { background: #243044; }
 .drawer { margin-top: 20px; }

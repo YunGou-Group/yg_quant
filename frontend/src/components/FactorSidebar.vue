@@ -93,4 +93,10 @@ aside input {
   background: #1e3a5f;
   color: var(--accent);
 }
+
+@media (max-width: 900px) {
+  .factor {
+    padding: 10px 8px;
+  }
+}
 </style>

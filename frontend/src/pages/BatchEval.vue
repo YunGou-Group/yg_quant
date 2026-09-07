@@ -13,6 +13,8 @@ import { useRunWorkspace } from "../runWorkspace.js";
 
 const { datasets, runId, runLabel, setRun, loadDatasets } = useRunWorkspace();
 
+const XT_METRICS = new Set(["exposure", "pure_ic", "attribution"]);
+
 const start = ref("2010-01-01");
 const end = ref("");
 const universe = ref("all");
@@ -21,7 +23,9 @@ const horizon = ref(5);
 const batchSize = ref(32);
 const nWorkers = ref(0);
 const label = ref("");
-const status = ref("可勾选指标和家族以缩小范围；不选家族即全部非 style_* 因子。");
+const status = ref(
+  "默认不含暴露/纯化IC/归因（X_T）；需要时在指标里勾选。不选家族即全部非 style_* 因子。"
+);
 const error = ref(false);
 const computing = ref(false);
 const progress = ref(null);
@@ -77,7 +81,10 @@ async function loadMeta() {
       (item) => (item.eval_scope || "single") === "single"
     );
     schemaMetrics.value = metrics;
-    selectedMetrics.value = metrics.map((item) => item.name);
+    // 与 CLI 一致：默认不勾选需要 X_T 的三项，避免网页全库评估误装大矩阵
+    selectedMetrics.value = metrics
+      .map((item) => item.name)
+      .filter((name) => !XT_METRICS.has(name));
     factorNames.value = (data.factors || []).filter((name) => name && !String(name).startsWith("style_"));
     const spec = (data.schema?.shared || []).find((item) => item.name === "universe");
     if (spec?.choices?.length) universeChoices.value = spec.choices;
@@ -92,8 +99,15 @@ async function run() {
   computing.value = true;
   status.value = "已提交全库任务…";
   const allMetrics = schemaMetrics.value.map((item) => item.name);
+  if (!selectedMetrics.value.length) {
+    error.value = true;
+    computing.value = false;
+    status.value = "请至少勾选一个指标（默认已去掉暴露/归因，可按需勾选）";
+    return;
+  }
+  // 全选才传 null（后端跑全部）；部分勾选传列表，避免空选误变成「全开含 X_T」
   const metrics =
-    selectedMetrics.value.length && selectedMetrics.value.length < allMetrics.length
+    selectedMetrics.value.length < allMetrics.length
       ? selectedMetrics.value
       : null;
   const factors =
@@ -345,7 +359,7 @@ onMounted(loadMeta);
 </template>
 
 <style scoped>
-.page { padding: 20px 24px; max-width: 1100px; }
+.page { max-width: none; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }
 .bar { height: 8px; background: #243044; border-radius: 99px; overflow: hidden; margin: 12px 0; }
 .fill { height: 100%; background: var(--accent); }

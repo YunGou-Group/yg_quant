@@ -48,10 +48,44 @@ watch(slug, loadPage);
 </template>
 
 <style scoped>
-.page { display: grid; grid-template-columns: 240px 1fr; height: 100%; }
-aside { border-right: 1px solid var(--line); overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 4px; }
+.page {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  height: 100%;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+aside {
+  border-right: 1px solid var(--line);
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 aside button { text-align: left; background: transparent; }
 aside button.active { background: var(--accent); color: #081018; }
-article { padding: 20px 24px; overflow: auto; }
-pre { white-space: pre-wrap; font-family: inherit; }
+article {
+  padding: clamp(20px, 3vw, 40px) clamp(20px, 4vw, 56px);
+  overflow: auto;
+}
+pre {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.65;
+  max-width: 72rem;
+}
+@media (max-width: 900px) {
+  .page { grid-template-columns: 1fr; }
+  aside {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    max-height: none;
+  }
+}
 </style>

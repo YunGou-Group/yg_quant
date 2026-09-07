@@ -114,27 +114,28 @@ watch(runId, loadColumns);
     </div>
     <p v-if="error" class="status error">{{ error }}</p>
     <p v-if="result" class="meta">通过 {{ result.n_passed }} / {{ result.n_total }}</p>
-    <table v-if="result">
-      <thead>
-        <tr>
-          <th v-for="col in resultCols" :key="col">{{ colLabel(col) }}</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="row in result.items" :key="row.factor_name" @click="openDetail(row)">
-          <td v-for="col in resultCols" :key="col">{{ col === "factor_name" ? row[col] : fmt(row[col]) }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div v-if="result" class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th v-for="col in resultCols" :key="col">{{ colLabel(col) }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in result.items" :key="row.factor_name" @click="openDetail(row)">
+            <td v-for="col in resultCols" :key="col">{{ col === "factor_name" ? row[col] : fmt(row[col]) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.page { padding: 20px 24px; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .rules { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
 .pill { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; }
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
 tbody tr { cursor: pointer; }
 </style>

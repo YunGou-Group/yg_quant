@@ -154,8 +154,8 @@ watch(runId, load);
     </div>
     <p v-if="error" class="status error">{{ error }}</p>
     <div class="overview">
-      <ChartPanel title="覆盖率 vs RankIC" :traces="scatter" />
-      <ChartPanel title="RankIC IR Top15" :traces="topIr" />
+      <ChartPanel title="覆盖率 vs RankIC" :traces="scatter" :height="380" />
+      <ChartPanel title="RankIC IR Top15" :traces="topIr" :height="380" />
     </div>
     <div class="table-wrap">
       <table>
@@ -184,18 +184,21 @@ watch(runId, load);
 </template>
 
 <style scoped>
-.page { padding: 20px 24px 40px; }
-.hero { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
-h1 { margin: 0 0 6px; font-size: 22px; }
-.toolbar { display: flex; gap: 12px; }
-.kpis { display: flex; gap: 12px; margin: 16px 0; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; min-width: 120px; }
+.hero { display: flex; justify-content: space-between; gap: 16px; align-items: start; flex-wrap: wrap; }
+h1 { margin: 0 0 6px; font-size: clamp(22px, 2.4vw, 28px); }
+.toolbar { display: flex; gap: 12px; flex-wrap: wrap; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 20px;
+}
 .label { color: var(--muted); font-size: 12px; }
-.value { font-size: 22px; font-weight: 600; }
-.overview { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.value { font-size: clamp(22px, 2.4vw, 32px); font-weight: 600; }
+.overview { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
 th { cursor: pointer; user-select: none; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #243044; }

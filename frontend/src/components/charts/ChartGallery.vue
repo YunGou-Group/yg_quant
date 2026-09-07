@@ -55,7 +55,13 @@ function showAny(ids) {
 .gallery {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 16px;
+}
+@media (min-width: 1400px) {
+  .gallery {
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
 }
 @media (max-width: 1100px) {
   .gallery {

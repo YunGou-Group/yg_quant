@@ -87,11 +87,10 @@ watch([runId, start, end], load);
 </template>
 
 <style scoped>
-.page { padding: 20px 24px; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
-.tabs { display: flex; gap: 4px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; cursor: pointer; }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; cursor: pointer; }
 header { display: flex; justify-content: space-between; margin-bottom: 8px; }
 .kv { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0; color: var(--muted); }
 .kv b { color: var(--text); font-weight: 500; }

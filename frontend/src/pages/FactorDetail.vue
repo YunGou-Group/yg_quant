@@ -216,16 +216,19 @@ watch(runId, load);
 </template>
 
 <style scoped>
-.page { padding: 20px 24px 40px; }
-.hero { display: flex; justify-content: space-between; gap: 16px; }
-h1 { margin: 0 0 6px; }
-.toolbar { display: flex; gap: 8px; align-items: center; }
+.hero { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+h1 { margin: 0 0 6px; font-size: clamp(22px, 2.4vw, 28px); }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .eval { color: var(--accent); text-decoration: none; white-space: nowrap; }
-.kpis { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; min-width: 120px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 18px;
+}
 .label { color: var(--muted); font-size: 12px; }
-.value { font-size: 18px; font-weight: 600; }
-.missing { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin: 0 0 16px; }
+.value { font-size: clamp(18px, 2vw, 26px); font-weight: 600; }
+.missing { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; margin: 0 0 16px; }
 .missing h2 { margin: 0 0 8px; font-size: 15px; }
 .missing ul { margin: 0; padding-left: 18px; }
 .missing li { margin: 4px 0; }

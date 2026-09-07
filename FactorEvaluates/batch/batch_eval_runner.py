@@ -63,18 +63,28 @@ class BatchEvalRunner:
         )
         batch_size = max(1, int(request.get("batch_size") or self.batch_size or 32))
         n_workers = int(request.get("n_workers") if request.get("n_workers") is not None else self.n_workers)
-        planned = self.plan_metrics(self.discoverer, request.get("metrics"))
+        # 未传 xt 时保持旧行为（网页勾选了暴露就跑）；CLI 会显式传 True/False
+        allow_xt = True if "xt" not in request else bool(request.get("xt"))
+        planned = self.plan_metrics(
+            self.discoverer,
+            request.get("metrics"),
+            allow_xt=allow_xt,
+        )
         daily_metrics = planned["daily"]
         label_metrics = planned["label"]
         crossday_metrics = planned["crossday"]
         library_metrics = planned["library"]
         need_xt = planned["need_xt"]
         need_style = planned["need_style"]
+        need_decay = any(m.get_name() == "ic_decay" for m in daily_metrics)
+        from ..metrics.extra_ic_metrics import DECAY_HORIZONS
+
         store = SharedPanelStore(
             start=start,
             end=end,
             universe=universe,
             horizon=horizon,
+            decay_horizons=DECAY_HORIZONS if need_decay else (),
             load_style=need_style,
             load_xt=need_xt,
             factor_loader=self.factor_loader,
@@ -210,7 +220,7 @@ class BatchEvalRunner:
             "library_metrics": library_names,
             "daily_keys": sorted(arrays.keys()),
             "has_xt": store.x_t is not None,
-            "has_style": bool(store.style),
+            "has_style": bool(store.style) or store.x_t is not None or planned["need_style"],
             "elapsed_sec": elapsed,
             "output_dir": str(out_dir),
         }
@@ -281,13 +291,29 @@ class BatchEvalRunner:
             del cube_i
 
     @staticmethod
-    def plan_metrics(discoverer: MetricDiscoverer, selected=None) -> Dict[str, Any]:
+    def plan_metrics(
+        discoverer: MetricDiscoverer,
+        selected=None,
+        *,
+        allow_xt: bool = True,
+    ) -> Dict[str, Any]:
+        xt_names = {"exposure", "pure_ic", "attribution"}
         wanted = None
         if selected:
-            resolved = discoverer.resolve(
-                [str(name) for name in selected], eval_scope="single"
-            )
-            wanted = {m.get_name() for m in resolved}
+            # 全库批跑会同时带 single + library 名；resolve(single) 会拒库级，这里拆开
+            library_catalog = {
+                m.get_name() for m in discoverer.metrics_for("library")
+            }
+            single_selected = [
+                str(name) for name in selected if str(name) not in library_catalog
+            ]
+            library_selected = {
+                str(name) for name in selected if str(name) in library_catalog
+            }
+            wanted = set(library_selected)
+            if single_selected:
+                resolved = discoverer.resolve(single_selected, eval_scope="single")
+                wanted |= {m.get_name() for m in resolved}
         single_metrics = discoverer.metrics_for("single")
         matrix_metrics = [
             m
@@ -314,10 +340,16 @@ class BatchEvalRunner:
         library_metrics = discoverer.metrics_for("library")
         if wanted is not None:
             library_metrics = [m for m in library_metrics if m.get_name() in wanted]
+        if not allow_xt:
+            daily_metrics = [m for m in daily_metrics if m.get_name() not in xt_names]
+            label_metrics = [m for m in label_metrics if m.get_name() not in xt_names]
+            crossday_metrics = [
+                m for m in crossday_metrics if m.get_name() not in xt_names
+            ]
         need_daily_corr = any(
             m.get_name() in {"factor_corr", "family_redundancy"} for m in library_metrics
         )
-        need_xt = any(m.get_name() in {"exposure", "pure_ic", "attribution"} for m in daily_metrics)
+        need_xt = any(m.get_name() in xt_names for m in daily_metrics)
         need_style = need_xt or any(
             "style_raw" in getattr(m, "engine_requires", ()) for m in daily_metrics
         )
@@ -337,24 +369,66 @@ class BatchEvalRunner:
         return n_dates * n_stocks * n_factors * 4 / (1024 ** 3)
 
     @staticmethod
+    def _available_ram_bytes() -> int:
+        """本机可用内存；估不准时退回 24GB 总容量的保守假设。"""
+        try:
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MemStatus()
+            stat.dwLength = ctypes.sizeof(_MemStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                # 留 4GB 给 OS / 浏览器 / Cursor，避免顶到 99%
+                return max(int(stat.ullAvailPhys) - 4 * (1024 ** 3), 2 * (1024 ** 3))
+        except Exception:
+            pass
+        try:
+            import psutil
+
+            return max(int(psutil.virtual_memory().available) - 4 * (1024 ** 3), 2 * (1024 ** 3))
+        except Exception:
+            return 20 * (1024 ** 3)
+
+    @staticmethod
     def _fit_workers(store: SharedPanelStore, batch_size: int, requested: int) -> int:
+        """``requested>0`` 用指定值；``<=0`` 按 CPU 与可用内存自动收敛。"""
         import os
 
         cpu = os.cpu_count() or 4
         want = int(requested)
-        if want <= 0:
-            want = max(1, cpu - 1)
-        want = max(1, min(want, cpu))
+        if want > 0:
+            return max(1, min(want, cpu))
+        want = max(1, cpu - 1)
         n_dates = len(store.dates)
         n_stocks = len(store.symbols)
+        # 面板在父进程与 SharedMemory 各一份（Windows spawn）
         panel = n_dates * n_stocks * 4
-        panel *= 2 + len(store.fwd) + (len(store.style) if store.style else 0)
+        panel_bytes = panel * (2 + len(store.fwd) + (len(store.style) if store.style else 0))
         if store.x_t is not None:
-            panel += int(np.prod(store.x_t.shape) * 4)
+            shape = tuple(int(x) for x in store.x_t.shape)
+            xt = 4
+            for dim in shape:
+                xt *= dim
+            panel_bytes += xt
+        panel_bytes *= 2
         cube = n_dates * n_stocks * batch_size * 4
         labels = n_dates * n_stocks * batch_size
-        used = panel + cube * 2 + labels + 2.5 * (1024 ** 3)
-        while want > 1 and used + want * 0.18 * (1024 ** 3) > 24 * (1024 ** 3):
+        used = panel_bytes + cube * 2 + labels + 1.5 * (1024 ** 3)
+        budget = BatchEvalRunner._available_ram_bytes()
+        worker_rss = 0.45 * (1024 ** 3)
+        while want > 1 and used + want * worker_rss > budget:
             want -= 1
         return want
 

@@ -6,10 +6,10 @@ const { runLink } = useRunWorkspace();
 </script>
 
 <template>
-  <div class="page">
+  <div class="page home">
     <div class="hero">
       <h1>yg_quant</h1>
-      <p class="meta">从这里进入因子分析或策略回测。两者并列，互不改写对方的结果。</p>
+      <p class="lead">从这里进入因子分析或策略回测。两者并列，互不改写对方的结果。</p>
     </div>
     <div class="cards">
       <RouterLink class="card" :to="runLink('/factors')">
@@ -27,27 +27,51 @@ const { runLink } = useRunWorkspace();
 </template>
 
 <style scoped>
-.page { padding: 40px 24px 48px; max-width: 920px; }
-.hero { margin-bottom: 24px; }
-h1 { margin: 0 0 8px; font-size: 28px; }
-.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.home {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100%;
+  width: min(100%, 1200px);
+  padding-top: clamp(40px, 8vh, 96px);
+  padding-bottom: clamp(40px, 8vh, 96px);
+}
+.hero { margin-bottom: clamp(24px, 4vh, 40px); }
+h1 {
+  margin: 0 0 12px;
+  font-size: clamp(32px, 4.5vw, 48px);
+  letter-spacing: 0.02em;
+}
+.lead {
+  margin: 0;
+  max-width: 42em;
+  color: var(--muted);
+  font-size: clamp(15px, 1.6vw, 18px);
+  line-height: 1.6;
+}
+.cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(16px, 2.5vw, 28px);
+}
 .card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 20px 22px;
+  border-radius: 16px;
+  padding: clamp(22px, 3vw, 36px);
   color: inherit;
   text-decoration: none;
-  min-height: 180px;
+  min-height: clamp(220px, 28vh, 320px);
 }
 .card:hover { border-color: var(--accent); }
-h2 { margin: 0; font-size: 20px; }
-.card p { margin: 0; color: var(--muted); line-height: 1.55; flex: 1; }
-.go { color: var(--accent); font-size: 13px; }
+h2 { margin: 0; font-size: clamp(20px, 2.2vw, 26px); }
+.card p { margin: 0; color: var(--muted); line-height: 1.6; flex: 1; font-size: 15px; }
+.go { color: var(--accent); font-size: 15px; }
 @media (max-width: 720px) {
   .cards { grid-template-columns: 1fr; }
+  .card { min-height: 180px; }
 }
 </style>

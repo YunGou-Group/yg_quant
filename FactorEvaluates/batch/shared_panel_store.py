@@ -43,12 +43,13 @@ class SharedPanelStore:
         full_open = self.market_loader.load_open()
         if full_open.empty:
             raise ValueError("open 面板为空")
-        full_open = full_open.copy()
-        full_open.index = pd.to_datetime(full_open.index).strftime("%Y-%m-%d")
         # 标签需要评价窗之后的开盘。先在完整行情上算远期收益，再按 start/end 切评价日。
+        # 不额外 copy：ReturnCalculator 内部会 copy，避免峰值翻倍。
+        full_open.index = pd.to_datetime(full_open.index).strftime("%Y-%m-%d")
         self._say("phase", "fwd_ret", 0.08, "计算远期收益")
-        calc = ReturnCalculator(full_open, lru_size=max(12, len(decay_horizons) + 1))
         wanted = {int(horizon), *[int(n) for n in decay_horizons]}
+        # LRU=1：算完一个 horizon 立刻转 float32 切片，避免 8 张全历史 float64 面板叠在内存里
+        calc = ReturnCalculator(full_open, lru_size=1)
         eval_open = full_open
         if start:
             eval_open = eval_open.loc[eval_open.index >= start]
@@ -63,6 +64,8 @@ class SharedPanelStore:
         for n in sorted(wanted):
             panel = calc.get(n).reindex(index=eval_open.index, columns=eval_open.columns)
             self.fwd[n] = panel.to_numpy(dtype=np.float32)
+            del panel
+        del calc
         self._say("phase", "universe", 0.12, "股票池 mask")
         mask_full = build_universe_mask(
             universe,
@@ -71,8 +74,9 @@ class SharedPanelStore:
             full_open,
             self.market_loader.storage,
         )
-        mask = mask_full.reindex(index=eval_open.index, columns=eval_open.columns)
-        self.mask = mask.fillna(False).to_numpy(dtype=bool)
+        mask_df = mask_full.reindex(index=eval_open.index, columns=eval_open.columns)
+        self.mask = mask_df.fillna(False).to_numpy(dtype=bool)
+        del mask_full
         self.style: Dict[str, np.ndarray] = {}
         self.x_t: Optional[np.ndarray] = None
         self.x_names: List[str] = []
@@ -88,6 +92,8 @@ class SharedPanelStore:
                 aligned.index = pd.to_datetime(aligned.index).strftime("%Y-%m-%d")
                 aligned = aligned.reindex(index=eval_open.index, columns=eval_open.columns)
                 self.style[name] = aligned.to_numpy(dtype=np.float32)
+                del aligned
+            del loaded
             if load_xt and "style_size" in self.style:
                 self._say("phase", "x_t", 0.22, "组装 X_T")
                 raw_frames = {
@@ -98,8 +104,12 @@ class SharedPanelStore:
                     self.market_loader.storage, eval_open.index, eval_open.columns
                 )
                 exposures = ExposureEngine().build(
-                    raw_frames, mask, industry_codes=codes, industry_labels=labels
+                    raw_frames,
+                    mask_df.fillna(False),
+                    industry_codes=codes,
+                    industry_labels=labels,
                 )
+                del raw_frames, codes
                 names = list(exposures.names)
                 stack = [np.ones((len(self.dates), len(self.symbols)), dtype=np.float32)]
                 x_names = ["intercept"]
@@ -115,6 +125,20 @@ class SharedPanelStore:
                     x_names.append(name)
                 self.x_t = np.stack(stack, axis=2)
                 self.x_names = x_names
+                nbytes = int(self.x_t.nbytes)
+                self._say(
+                    "phase",
+                    "x_t_done",
+                    0.23,
+                    f"X_T shape={tuple(self.x_t.shape)} cols={len(self.x_names)} "
+                    f"~{nbytes / (1024 ** 3):.2f}GB",
+                )
+                del exposures, stack
+            elif load_xt:
+                self._say("phase", "x_t_skip", 0.22, "需要 X_T 但缺少 style_size，已跳过")
+        # open 全表只为算远期/股票池服务；numpy 面板建好后丢掉 pandas 缓存
+        self.market_loader._field_panels.clear()
+        del full_open, eval_open, mask_df
 
     def barra_day(self, date_i: int, row_mask: np.ndarray) -> Optional[np.ndarray]:
         if not self.style:

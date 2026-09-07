@@ -105,6 +105,12 @@ npm run dev
 python -m FactorEvaluates.run_batch --start 2010-01-01
 ```
 
+默认**不**组装 `X_T`，也**不**跑 `exposure` / `pure_ic` / `attribution`。需要时显式加：
+
+```powershell
+python -m FactorEvaluates.run_batch --start 2010-01-01 --xt
+```
+
 | 参数 | 默认 | 含义 |
 |------|------|------|
 | `--start` | `2010-01-01` | 评估起点 |
@@ -112,7 +118,8 @@ python -m FactorEvaluates.run_batch --start 2010-01-01
 | `--universe` | `all` | 股票池，与回测相同 |
 | `--horizon` | `5` | 远期收益天数 N |
 | `--batch-size` | `32` | 一次装入内存的因子个数 |
-| `--n-workers` | `0` | 日度进程数；`0` 为 CPU 核数减 1 |
+| `--n-workers` | `0` | 日度进程数；`0` 按内存自动选，`>0` 用指定值 |
+| `--xt` | 关 | 启用暴露/纯化IC/归因并组装 X_T |
 | `--run-id` | 自动 | 这次全库评估的目录名 |
 
 新指标放进 `FactorEvaluates/metrics/`。

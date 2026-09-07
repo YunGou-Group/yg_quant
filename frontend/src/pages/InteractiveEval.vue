@@ -302,9 +302,10 @@ onMounted(async () => {
 <style scoped>
 .app {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
   grid-template-rows: auto 1fr;
-  height: calc(100vh - 64px);
+  height: 100%;
+  min-height: 0;
 }
 
 header {
@@ -312,9 +313,10 @@ header {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 10px 16px;
+  padding: 12px var(--page-pad-x);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
+  flex-wrap: wrap;
 }
 
 .tabs {
@@ -328,7 +330,7 @@ header {
 
 main {
   overflow: auto;
-  padding: 12px 16px 24px;
+  padding: var(--page-pad-y) var(--page-pad-x) 32px;
 }
 
 .toolbar {
@@ -337,5 +339,17 @@ main {
   gap: 12px;
   align-items: end;
   margin-bottom: 12px;
+}
+
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr;
+  }
+  .app :deep(aside) {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    max-height: 220px;
+  }
 }
 </style>

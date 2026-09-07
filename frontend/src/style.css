@@ -6,6 +6,25 @@
   --muted: #8b9bb4;
   --accent: #3d9cf0;
   --bad: #f07178;
+  --page-pad-y: 24px;
+  --page-pad-x: 28px;
+  --page-max: 1520px;
+  --header-h: 64px;
+}
+
+@media (min-width: 1400px) {
+  :root {
+    --page-pad-y: 32px;
+    --page-pad-x: 40px;
+    --page-max: 1680px;
+  }
+}
+
+@media (max-width: 720px) {
+  :root {
+    --page-pad-y: 16px;
+    --page-pad-x: 14px;
+  }
 }
 
 * {
@@ -73,4 +92,33 @@ button.active {
 
 .status.error {
   color: var(--bad);
+}
+
+.page {
+  padding: var(--page-pad-y) var(--page-pad-x) 48px;
+  width: min(100%, var(--page-max));
+  margin-inline: auto;
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+@media (max-width: 720px) {
+  button,
+  select,
+  input {
+    min-height: 40px;
+    font-size: 16px;
+  }
 }
