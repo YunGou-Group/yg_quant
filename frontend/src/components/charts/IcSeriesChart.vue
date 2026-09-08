@@ -5,6 +5,20 @@ import { asXY, lineTrace } from "./seriesUtils.js";
 
 const props = defineProps({ series: { type: Object, default: () => ({}) } });
 
+/** 全库 run 只落日度 RankIC；累计在前端 skipna 累加。 */
+function cumFromDaily(item) {
+  const { x, y } = asXY(item);
+  if (!x.length) return null;
+  let sum = 0;
+  const values = y.map((v) => {
+    const n = Number(v);
+    if (v == null || !Number.isFinite(n)) return null;
+    sum += n;
+    return sum;
+  });
+  return { dates: x, values };
+}
+
 const traces = computed(() => {
   const s = props.series || {};
   const wanted = [
@@ -29,7 +43,14 @@ const traces = computed(() => {
       out.push(trace);
     }
   }
-  const cum = lineTrace(s.rank_ic__cumsum || s.cumsum, "累计 RankIC", { yaxis: "y2" });
+  let cum = lineTrace(s.rank_ic__cumsum || s.cumsum, "累计 RankIC", { yaxis: "y2" });
+  if (!cum) {
+    cum = lineTrace(
+      cumFromDaily(s.rank_ic || s.daily_rank_ic),
+      "累计 RankIC",
+      { yaxis: "y2" }
+    );
+  }
   if (cum) out.push(cum);
   return out.filter((t) => asXY(t).x.length);
 });

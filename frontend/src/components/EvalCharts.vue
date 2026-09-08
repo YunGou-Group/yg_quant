@@ -1,7 +1,11 @@
 <script setup>
 import { computed } from "vue";
 import ChartGallery from "./charts/ChartGallery.vue";
-import { flattenEvalResult } from "./charts/seriesUtils.js";
+import {
+  BARRA_STYLE_KEYS,
+  BARRA_STYLE_LABELS,
+  flattenEvalResult,
+} from "./charts/seriesUtils.js";
 import { icirValue, fmt } from "../format.js";
 
 const props = defineProps({
@@ -18,6 +22,32 @@ function fieldHint(metricName, fieldName) {
 
 const series = computed(() => flattenEvalResult(props.data));
 
+function exposureStyleItems(scalars) {
+  if (!scalars) return [];
+  return BARRA_STYLE_KEYS.map((key) => {
+    const value = scalars[`ma_abs_${key}`] ?? scalars[`mean_abs_${key}`];
+    const label = BARRA_STYLE_LABELS[key] || key;
+    return {
+      label: `|maβ| ${label}`,
+      value,
+      title: fieldHint("exposure", `ma_abs_${key}`),
+    };
+  });
+}
+
+function attributionStyleItems(scalars) {
+  if (!scalars) return [];
+  return BARRA_STYLE_KEYS.map((key) => {
+    const value = scalars[`cum_attr_${key}`];
+    const label = BARRA_STYLE_LABELS[key] || key;
+    return {
+      label: `累计 ${label}`,
+      value,
+      title: fieldHint("attribution", `cum_attr_${key}`),
+    };
+  });
+}
+
 const kpis = computed(() => {
   const data = props.data;
   if (!data) return [];
@@ -27,6 +57,8 @@ const kpis = computed(() => {
   const trend = metrics.long_short_term_consistency || {};
   const quantile = metrics.quantile || {};
   const coverage = metrics.coverage_rate || {};
+  const exp = metrics.exposure?.scalars || {};
+  const attr = metrics.attribution?.scalars || {};
   const market = data.market || {};
   const marketLabel = market.label || "沪深300";
   const marketKpis = data.market
@@ -59,29 +91,22 @@ const kpis = computed(() => {
     {
       title: "风格暴露",
       items: [
-        { label: "|maβ| Size", value: metrics.exposure?.scalars?.ma_abs_style_size, title: fieldHint("exposure", "ma_abs_style_size") },
-        { label: "|maβ| NLSIZE", value: metrics.exposure?.scalars?.ma_abs_nlsize ?? metrics.exposure?.scalars?.mean_abs_nlsize, title: fieldHint("exposure", "ma_abs_nlsize") },
-        { label: "|maβ| Momentum", value: metrics.exposure?.scalars?.ma_abs_style_momentum, title: fieldHint("exposure", "ma_abs_style_momentum") },
-        { label: "|maβ| Beta", value: metrics.exposure?.scalars?.ma_abs_style_beta, title: fieldHint("exposure", "ma_abs_style_beta") },
-        { label: "maβ Size末", value: metrics.exposure?.scalars?.ma_last_style_size, title: fieldHint("exposure", "ma_last_style_size") },
-        { label: "maβ Mom末", value: metrics.exposure?.scalars?.ma_last_style_momentum, title: fieldHint("exposure", "ma_last_style_momentum") },
-        { label: "maβ Beta末", value: metrics.exposure?.scalars?.ma_last_style_beta, title: fieldHint("exposure", "ma_last_style_beta") },
-        { label: "行业哑变量", value: metrics.exposure?.scalars?.n_industries, title: fieldHint("exposure", "n_industries") },
-        { label: "|maβ| 行业", value: metrics.exposure?.scalars?.ma_abs_industry, title: fieldHint("exposure", "ma_abs_industry") },
-        { label: "主行业", value: metrics.exposure?.scalars?.top_industry, title: fieldHint("exposure", "top_industry") },
-        { label: "|maβ| 主行业", value: metrics.exposure?.scalars?.ma_abs_top_industry, title: fieldHint("exposure", "ma_abs_top_industry") },
+        ...exposureStyleItems(exp),
+        { label: "行业哑变量", value: exp.n_industries, title: fieldHint("exposure", "n_industries") },
+        { label: "|maβ| 行业", value: exp.ma_abs_industry, title: fieldHint("exposure", "ma_abs_industry") },
+        { label: "主行业", value: exp.top_industry, title: fieldHint("exposure", "top_industry") },
+        { label: "|maβ| 主行业", value: exp.ma_abs_top_industry, title: fieldHint("exposure", "ma_abs_top_industry") },
       ],
     },
     {
       title: "风格归因",
       items: [
-        { label: "累计因子收益", value: metrics.attribution?.scalars?.cum_factor, title: fieldHint("attribution", "cum_factor") },
-        { label: "累计风格归因", value: metrics.attribution?.scalars?.cum_explained, title: fieldHint("attribution", "cum_explained") },
-        { label: "累计行业归因", value: metrics.attribution?.scalars?.cum_attr_industry, title: fieldHint("attribution", "cum_attr_industry") },
-        { label: "累计残差", value: metrics.attribution?.scalars?.cum_residual, title: fieldHint("attribution", "cum_residual") },
-        { label: "残差占比", value: metrics.attribution?.scalars?.residual_share, title: fieldHint("attribution", "residual_share") },
-        { label: "maf Size末", value: metrics.attribution?.scalars?.ma_last_f_style_size, title: fieldHint("attribution", "ma_last_f_style_size") },
-        { label: "maf Mom末", value: metrics.attribution?.scalars?.ma_last_f_style_momentum, title: fieldHint("attribution", "ma_last_f_style_momentum") },
+        { label: "累计因子收益", value: attr.cum_factor, title: fieldHint("attribution", "cum_factor") },
+        { label: "累计风格归因", value: attr.cum_explained, title: fieldHint("attribution", "cum_explained") },
+        { label: "累计行业归因", value: attr.cum_attr_industry, title: fieldHint("attribution", "cum_attr_industry") },
+        { label: "累计残差", value: attr.cum_residual, title: fieldHint("attribution", "cum_residual") },
+        { label: "残差占比", value: attr.residual_share, title: fieldHint("attribution", "residual_share") },
+        ...attributionStyleItems(attr),
       ],
     },
     {

@@ -83,13 +83,59 @@ export function flattenEvalResult(data) {
   return out;
 }
 
-export function styleLabel(key) {
-  return String(key)
+/** 与 FactorEvaluates.exposure_engine.STYLE_LABELS 对齐（含 NLSIZE）。 */
+export const BARRA_STYLE_KEYS = [
+  "style_size",
+  "nlsize",
+  "style_beta",
+  "style_momentum",
+  "style_resvol",
+  "style_liquidity",
+  "style_btop",
+  "style_ey",
+  "style_growth",
+  "style_leverage",
+];
+
+export const BARRA_STYLE_LABELS = {
+  style_size: "Size",
+  nlsize: "NLSIZE",
+  style_beta: "Beta",
+  style_momentum: "Momentum",
+  style_resvol: "ResVol",
+  style_liquidity: "Liquidity",
+  style_btop: "BTOP",
+  style_ey: "EY",
+  style_growth: "Growth",
+  style_leverage: "Leverage",
+};
+
+export function styleKeyOf(raw) {
+  return String(raw || "")
     .replace(/^ma_beta_/, "")
     .replace(/^beta_/, "")
     .replace(/^ma_f_/, "")
     .replace(/^f_/, "")
     .replace(/^cum_attr_/, "")
-    .replace(/^factor_style_correlation_/, "")
-    .replace(/^style_/, "");
+    .replace(/^attr_/, "")
+    .replace(/^factor_style_correlation_/, "");
+}
+
+export function styleLabel(key) {
+  const bare = styleKeyOf(key);
+  return BARRA_STYLE_LABELS[bare] || bare.replace(/^style_/, "");
+}
+
+/** 按 Barra 固定顺序收集序列里出现的风格键（跳过行业）。 */
+export function orderedStyleKeys(series, prefix) {
+  const found = new Set();
+  for (const key of Object.keys(series || {})) {
+    if (!key.startsWith(prefix)) continue;
+    const styleKey = key.slice(prefix.length);
+    if (!styleKey || styleKey.startsWith("ind_")) continue;
+    found.add(styleKey);
+  }
+  const ordered = BARRA_STYLE_KEYS.filter((k) => found.has(k));
+  const rest = [...found].filter((k) => !BARRA_STYLE_KEYS.includes(k)).sort();
+  return ordered.concat(rest);
 }
