@@ -60,13 +60,33 @@ def main() -> None:
         choices=universe_names(),
         help="Universes/ 已注册股票池，asof PIT",
     )
-    parser.add_argument("--factor", default=None, help="topk 所用因子名")
-    parser.add_argument("--n", type=int, default=None, help="topk 持仓数 / 小市值候选数")
+    parser.add_argument(
+        "--factor",
+        default=None,
+        help="topk：单因子名；multifactor：逗号分隔，如 a,b,-c（前缀 - 取负）",
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=None,
+        help="topk / multifactor 持仓数，或小市值候选数",
+    )
     parser.add_argument(
         "--rebalance",
         default="daily",
-        choices=["daily", "weekly"],
-        help="topk 调仓频率，默认 daily；weekly 为周五收盘（T+1 周一成交）",
+        help="topk / multifactor 调仓：daily、weekly（周五收盘），或 N 个交易日如 5 / 5d / every5",
+    )
+    parser.add_argument(
+        "--lookback",
+        type=int,
+        default=None,
+        help="multifactor OLS 回归回看交易日数，默认 60",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=None,
+        help="multifactor OLS 远期收益持有交易日，默认 5",
     )
     parser.add_argument("--hold", type=int, default=HOLD_N, help="小市值：剔除最小后取到第 N 名")
     parser.add_argument("--anti-tail", action="store_true", help="小市值防尾声")

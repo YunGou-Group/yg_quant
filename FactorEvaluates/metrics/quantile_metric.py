@@ -333,7 +333,7 @@ class QuantileTurnoverMetric(BaseMetric):
     dimension = "有效期"
     description = "相邻日分位组成员变动率 1 − overlap/total"
     cost = "derived"
-    produces = ()
+    produces = ("quantile_turnover",)
     requires = ("quantile_labels",)
 
     def params(self) -> Sequence[ParamSpec]:
@@ -361,6 +361,7 @@ class QuantileTurnoverMetric(BaseMetric):
                     values.append(1.0 - overlap / total if total else np.nan)
                 prev = members
             series[f"quantile_turnover_Q{qi}"] = pd.Series(values, index=labels.index, dtype="float64")
+        ctx.intermediates["quantile_turnover"] = series
         top = series[f"quantile_turnover_Q{n_q}"]
         clean = top.dropna()
         return MetricResult(
@@ -393,4 +394,200 @@ class QuantileTurnoverMetric(BaseMetric):
                     out[f"quantile_turnover_Q{q}"][t] = np.where(
                         union > 0, 1.0 - inter / union, np.nan
                     )
+        return out
+
+
+class QuantileFactorMeanMetric(BaseMetric):
+    name = "quantile_factor_mean"
+    dimension = "暴露度"
+    description = "各分位组内因子值的截面均值"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM, N_QUANTILES_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "暴露度", "顶组因子均值", "最高分位组日均因子值"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        n_q = int(params.get("n_quantiles", batch_ctx.n_quantiles))
+        f = batch_ctx.masked_factors()
+        p = f.shape[1]
+        labels = _ensure_labels(batch_ctx, n_q)
+        out = {}
+        for qi in range(1, n_q + 1):
+            out[f"quantile_factor_mean_Q{qi}"] = _group_mean(f, labels, qi, min_count=1)
+        if not out:
+            for qi in range(1, n_q + 1):
+                out[f"quantile_factor_mean_Q{qi}"] = np.full(p, np.nan)
+        return out
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        from ..matrix_utils import apply_daily_matrix, result_from_daily
+
+        daily = apply_daily_matrix(self, ctx, params)
+        n_q = int(params.get("n_quantiles", 5))
+        return result_from_daily(
+            daily, primary=f"quantile_factor_mean_Q{n_q}", extra_scalars={"horizon": ctx.horizon}
+        )
+
+
+# A 股默认完整买卖约 11.2bp；首日只收买入约 3.1bp
+DEFAULT_ROUND_TRIP_BPS = 11.2
+DEFAULT_BUY_RATE = 0.00031
+DEFAULT_SELL_RATE = 0.00081
+
+COST_BPS_PARAM = ParamSpec(
+    name="transaction_cost_bps",
+    type="float",
+    label="完整买卖费率 (bp)",
+    default=DEFAULT_ROUND_TRIP_BPS,
+    min=0.0,
+    max=100.0,
+    scope="metric",
+)
+BUY_RATE_PARAM = ParamSpec(
+    name="transaction_buy_rate",
+    type="float",
+    label="买入费率",
+    default=DEFAULT_BUY_RATE,
+    min=0.0,
+    max=0.01,
+    scope="metric",
+)
+SELL_RATE_PARAM = ParamSpec(
+    name="transaction_sell_rate",
+    type="float",
+    label="卖出费率",
+    default=DEFAULT_SELL_RATE,
+    min=0.0,
+    max=0.01,
+    scope="metric",
+)
+LIQUIDATE_PARAM = ParamSpec(
+    name="liquidate_at_end",
+    type="bool",
+    label="末日清仓收费",
+    default=False,
+    scope="metric",
+)
+
+
+def _net_from_turnover(gross: np.ndarray, turnover: np.ndarray, cost_bps: float) -> np.ndarray:
+    return np.asarray(gross, dtype=np.float64) - np.asarray(turnover, dtype=np.float64) * (
+        float(cost_bps) / 10_000.0
+    )
+
+
+class QuantileReturnsAfterCostMetric(BaseMetric):
+    name = "quantile_returns_after_cost"
+    dimension = "预测力"
+    description = "分位组收益按成员换手扣费：中间日 turnover×完整买卖费率，首日仅收买入费"
+    cost = "derived"
+    produces = ()
+    requires = ("quantile_labels", "quantile_turnover")
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (
+            HORIZON_PARAM,
+            UNIVERSE_PARAM,
+            N_QUANTILES_PARAM,
+            MIN_PER_BIN_PARAM,
+            COST_BPS_PARAM,
+            BUY_RATE_PARAM,
+            SELL_RATE_PARAM,
+            LIQUIDATE_PARAM,
+        )
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "预测力", "顶组费后收益均值", "最高分位组扣费后日均收益"),)
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        labels = ctx.intermediates.get("quantile_labels")
+        if not isinstance(labels, pd.DataFrame):
+            raise ValueError("quantile_returns_after_cost 需要 quantile_labels，请先运行 quantile")
+        n_q = int(params.get("n_quantiles", 5))
+        min_per = int(params.get("min_stock_per_bin", 5))
+        cost_bps = float(params.get("transaction_cost_bps", DEFAULT_ROUND_TRIP_BPS))
+        buy_rate = float(params.get("transaction_buy_rate", DEFAULT_BUY_RATE))
+        sell_rate = float(params.get("transaction_sell_rate", DEFAULT_SELL_RATE))
+        liquidate = bool(params.get("liquidate_at_end", False))
+
+        turnover = ctx.intermediates.get("quantile_turnover")
+        if not isinstance(turnover, dict):
+            raise ValueError("quantile_returns_after_cost 需要 quantile_turnover，请先运行 quantile_turnover")
+
+        factor = ctx.masked_factor()
+        fwd = ctx.masked_fwd_ret()
+        series: Dict[str, pd.Series] = {}
+        for qi in range(1, n_q + 1):
+            gross_vals = []
+            for date in factor.index:
+                row_f = factor.loc[date]
+                row_r = fwd.loc[date]
+                lab = labels.loc[date]
+                sel = (lab == qi) & row_f.notna() & row_r.notna()
+                if int(sel.sum()) < min_per:
+                    gross_vals.append(np.nan)
+                else:
+                    gross_vals.append(float(row_r[sel].mean()))
+            gross = pd.Series(gross_vals, index=factor.index, dtype="float64")
+            to = turnover.get(f"quantile_turnover_Q{qi}")
+            if to is None:
+                to = pd.Series(np.nan, index=factor.index)
+            net = gross.copy()
+            for i, date in enumerate(gross.index):
+                g = gross.iloc[i]
+                if not np.isfinite(g):
+                    net.iloc[i] = np.nan
+                    continue
+                if i == 0:
+                    net.iloc[i] = g - buy_rate
+                else:
+                    t = to.iloc[i] if date in to.index else np.nan
+                    if not np.isfinite(t):
+                        net.iloc[i] = np.nan
+                    else:
+                        net.iloc[i] = float(_net_from_turnover(g, t, cost_bps))
+                if liquidate and i == len(gross) - 1 and np.isfinite(net.iloc[i]):
+                    net.iloc[i] = float(net.iloc[i] - (1.0 + g) * sell_rate)
+            series[f"quantile_returns_after_cost_Q{qi}"] = net.astype("float64")
+
+        top = series[f"quantile_returns_after_cost_Q{n_q}"]
+        clean = top.dropna()
+        return MetricResult(
+            scalars={
+                "mean": float(clean.mean()) if len(clean) else float("nan"),
+                "n_days": int(len(clean)),
+                "horizon": ctx.horizon,
+                "transaction_cost_bps": cost_bps,
+            },
+            series=series,
+        )
+
+    def compute_crossday(
+        self, arrays: Mapping[str, Any], params: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        n_q = int(params.get("n_quantiles", 5))
+        cost_bps = float(params.get("transaction_cost_bps", DEFAULT_ROUND_TRIP_BPS))
+        buy_rate = float(params.get("transaction_buy_rate", DEFAULT_BUY_RATE))
+        sell_rate = float(params.get("transaction_sell_rate", DEFAULT_SELL_RATE))
+        liquidate = bool(params.get("liquidate_at_end", False))
+        out: Dict[str, Any] = {}
+        for qi in range(1, n_q + 1):
+            ret = arrays.get(f"quantile_returns_Q{qi}")
+            to = arrays.get(f"quantile_turnover_Q{qi}")
+            if ret is None or to is None:
+                continue
+            ret = np.asarray(ret, dtype=np.float64)
+            to = np.asarray(to, dtype=np.float64)
+            net = _net_from_turnover(ret, to, cost_bps)
+            if net.shape[0] > 0:
+                net = net.copy()
+                net[0] = ret[0] - buy_rate
+                if liquidate:
+                    net[-1] = net[-1] - (1.0 + ret[-1]) * sell_rate
+            out[f"quantile_returns_after_cost_Q{qi}"] = net.astype(np.float32, copy=False)
         return out

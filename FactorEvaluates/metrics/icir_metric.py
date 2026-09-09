@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 from ..base_metric import BaseMetric
@@ -14,7 +15,7 @@ from ..context import EvalContext
 from ..field_doc import FieldDoc
 from ..metric_result import MetricResult
 from ..param_spec import HORIZON_PARAM, ParamSpec
-from ..matrix_utils import icir_row
+from ..matrix_utils import expanding_icir, icir_row
 
 
 class ICIRMetric(BaseMetric):
@@ -107,3 +108,51 @@ class PearsonICIRMetric(BaseMetric):
         if ic is None:
             return {}
         return {"ic_ir": icir_row(ic)}
+
+
+class NonlinearICIRMetric(BaseMetric):
+    name = "nonlinear_ic_ir"
+    dimension = "预测力"
+    description = "非线性 IC 的 expanding 信息比率 mean/std（与参考实现对齐的逐日序列）"
+    cost = "derived"
+    produces = ()
+    requires = ("daily_nonlinear_ic",)
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM,)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (
+            FieldDoc("icir", "预测力", "非线性IC IR", "全样本 mean(nonlinear_ic)/std"),
+            FieldDoc("n_days", "样本", "有效天数", "非线性 IC 非空的交易日数"),
+            FieldDoc("horizon", "参数", "持有期 N", "远期收益的持有交易日数"),
+        )
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = ctx.intermediates.get("daily_nonlinear_ic")
+        if daily is None:
+            raise ValueError("nonlinear_ic_ir 需要中间量 daily_nonlinear_ic，请先运行 nonlinear_ic")
+        if not isinstance(daily, pd.Series):
+            daily = pd.Series(daily)
+        values = daily.to_numpy(dtype=np.float64)
+        expanding = expanding_icir(values[:, None])[:, 0]
+        series = pd.Series(expanding, index=daily.index, name="nonlinear_ic_ir", dtype="float64")
+        summary = CrossSectionICCalculator().summary(daily)
+        return MetricResult(
+            scalars={
+                "icir": summary["icir"],
+                "ic_mean": summary["mean"],
+                "ic_std": summary["std"],
+                "n_days": summary["n_days"],
+                "horizon": ctx.horizon,
+            },
+            series={"nonlinear_ic_ir": series},
+        )
+
+    def compute_crossday(
+        self, arrays: Mapping[str, Any], params: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        src = arrays.get("nonlinear_ic")
+        if src is None:
+            return {}
+        return {"nonlinear_ic_ir": expanding_icir(np.asarray(src, dtype=np.float64)).astype(np.float32)}

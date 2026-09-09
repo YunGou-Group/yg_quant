@@ -59,6 +59,60 @@ class FactorStatisticsMetric(BaseMetric):
         return result_from_daily(daily, primary="factor_mean", extra_scalars={"horizon": ctx.horizon})
 
 
+class FactorMinMetric(BaseMetric):
+    name = "factor_min"
+    dimension = "暴露度"
+    description = "截面因子最小值"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "暴露度", "截面最小均值", "日度 factor_min 的区间平均"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        f = batch_ctx.masked_factors()
+        with np.errstate(all="ignore"):
+            vals = np.nanmin(f, axis=0)
+        vals = np.asarray(vals, dtype=np.float64).reshape(-1)
+        vals[~np.isfinite(f).any(axis=0)] = np.nan
+        return {"factor_min": vals}
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = apply_daily_matrix(self, ctx, params)
+        return result_from_daily(daily, primary="factor_min", extra_scalars={"horizon": ctx.horizon})
+
+
+class FactorMaxMetric(BaseMetric):
+    name = "factor_max"
+    dimension = "暴露度"
+    description = "截面因子最大值"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "暴露度", "截面最大均值", "日度 factor_max 的区间平均"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        f = batch_ctx.masked_factors()
+        with np.errstate(all="ignore"):
+            vals = np.nanmax(f, axis=0)
+        vals = np.asarray(vals, dtype=np.float64).reshape(-1)
+        vals[~np.isfinite(f).any(axis=0)] = np.nan
+        return {"factor_max": vals}
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = apply_daily_matrix(self, ctx, params)
+        return result_from_daily(daily, primary="factor_max", extra_scalars={"horizon": ctx.horizon})
+
+
 class FactorAutocorrMetric(BaseMetric):
     name = "factor_autocorr"
     dimension = "有效期"

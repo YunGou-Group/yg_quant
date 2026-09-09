@@ -19,6 +19,7 @@ from StrategyEngine.context import DayContext
 from StrategyEngine.holdings import TargetHoldings
 from StrategyEngine.allocators import Allocator, EqualWeight
 from StrategyEngine.strategy import Strategy
+from Strategies.rebalance_schedule import week_end_asofs
 
 logger = logging.getLogger("Strategies")
 
@@ -77,32 +78,6 @@ TROUBLE_MAKER_INDUSTRIES = frozenset(
         # "801180.SI",  # 房地产
     }
 )
-
-
-def week_end_asofs(dates: Sequence[str]) -> Set[str]:
-    """调仓日：周五收盘；周五休市则用当周最后一个交易日（下一节已跨周）。
-
-    引擎按 T+1 开盘成交，所以正常是周一换仓。回测收在周中的最后一天不当周五。
-    """
-    days = [str(d) for d in dates]
-    out: Set[str] = set()
-    for i, day in enumerate(days):
-        ts = pd.Timestamp(day)
-        weekday = int(ts.weekday())
-        if weekday == 4:
-            out.add(day)
-            continue
-        if weekday > 4:
-            continue
-        if i + 1 >= len(days):
-            continue
-        nxt = pd.Timestamp(days[i + 1])
-        if (int(nxt.isocalendar().year), int(nxt.isocalendar().week)) != (
-            int(ts.isocalendar().year),
-            int(ts.isocalendar().week),
-        ):
-            out.add(day)
-    return out
 
 
 @dataclass

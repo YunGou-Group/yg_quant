@@ -11,7 +11,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from StrategyEngine.attribution import attribute_for_web, load_attribution_view
 from StrategyEngine.run import catalog_meta, list_snapshots, load_snapshot, run_backtest
@@ -23,12 +23,17 @@ logger = logging.getLogger("App")
 
 
 class BacktestRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     strategy: str
     start: Optional[str] = None
     end: Optional[str] = None
     universe: Optional[str] = "all"
     factor: Optional[str] = None
     n: Optional[int] = None
+    rebalance: Optional[str] = None
+    lookback: Optional[int] = None
+    horizon: Optional[int] = None
     hold: Optional[int] = None
     anti_tail: bool = False
     allocator: str = "equal"

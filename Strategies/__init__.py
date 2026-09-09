@@ -7,6 +7,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from .multifactor import MultiFactorTopK
 from .small_cap import CANDIDATE_N, HOLD_N, FinRow, SmallCapData, SmallCapStrategy
 from .topk import FactorTopK
 
@@ -15,6 +16,7 @@ __all__ = [
     "FactorTopK",
     "FinRow",
     "HOLD_N",
+    "MultiFactorTopK",
     "SmallCapData",
     "SmallCapStrategy",
 ]

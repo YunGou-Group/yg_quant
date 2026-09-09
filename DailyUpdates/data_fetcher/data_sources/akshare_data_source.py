@@ -2,14 +2,16 @@
 # -*- coding: utf-8 -*-
 """Akshare 数据源：与 Tushare 使用同一套 data_type / api_name，输出相同列名。
 
-不需要 token。多数接口按股票循环，全市场历史比 Tushare 慢一个数量级。
-涨跌停价由昨收和板块涨跌幅推算（Akshare 无历史涨跌停接口）。
+不需要 token。个股日线 / 复权直接走新浪（东财易断连）。多数接口按股票循环，
+全市场历史比 Tushare 慢一个数量级。涨跌停价由昨收和板块涨跌幅推算。
 指数成分权重是中证官网最新快照，不是逐日调样。
 """
 
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -136,10 +138,26 @@ def _sina_symbol(code: str) -> str:
     return f"{market.lower()}{number}"
 
 
-def _retry_call(fn, attempts: int = 2, pause: float = 0.35):
+def _retry_call(
+    fn,
+    attempts: int = 3,
+    pause: float = 0.8,
+    timeout: Optional[float] = 45.0,
+):
+    """限流/断连重试；timeout 秒内无返回则放弃本轮（避免无限卡住）。"""
     last = None
     for index in range(attempts):
         try:
+            if timeout and timeout > 0:
+                # wait=False：超时后不堵在僵死的 HTTP 线程上
+                pool = ThreadPoolExecutor(max_workers=1)
+                fut = pool.submit(fn)
+                try:
+                    return fut.result(timeout=timeout)
+                except FuturesTimeoutError as exc:
+                    raise TimeoutError(f"请求超时 ({timeout:.0f}s)") from exc
+                finally:
+                    pool.shutdown(wait=False, cancel_futures=True)
             return fn()
         except Exception as exc:
             last = exc
@@ -246,20 +264,6 @@ class AkshareDataSource(DataSourceBase):
         return listed[col].astype(str).map(_em_symbol).dropna().unique().tolist()
 
     def _hist_one(self, symbol: str, start: str, end: str, adjust: str = "") -> pd.DataFrame:
-        try:
-            raw = _retry_call(
-                lambda: ak.stock_zh_a_hist(
-                    symbol=symbol,
-                    period="daily",
-                    start_date=start,
-                    end_date=end,
-                    adjust=adjust,
-                )
-            )
-            if raw is not None and not raw.empty:
-                return self._normalize_em_hist(raw, symbol)
-        except Exception as exc:
-            tqdm.write(f"[akshare] 东财 K 线失败 {symbol}: {exc}，改用新浪")
         return self._hist_from_sina(symbol, start, end, adjust)
 
     def _normalize_em_hist(self, raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -279,11 +283,16 @@ class AkshareDataSource(DataSourceBase):
     def _hist_from_sina(
         self, symbol: str, start: str, end: str, adjust: str = ""
     ) -> pd.DataFrame:
-        raw = ak.stock_zh_a_daily(
-            symbol=_sina_symbol(symbol),
-            start_date=start,
-            end_date=end,
-            adjust=adjust or "",
+        raw = _retry_call(
+            lambda: ak.stock_zh_a_daily(
+                symbol=_sina_symbol(symbol),
+                start_date=start,
+                end_date=end,
+                adjust=adjust or "",
+            ),
+            attempts=3,
+            pause=1.0,
+            timeout=45.0,
         )
         if raw is None or raw.empty:
             return pd.DataFrame()

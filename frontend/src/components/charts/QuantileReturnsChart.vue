@@ -8,8 +8,12 @@ const props = defineProps({ series: { type: Object, default: () => ({}) } });
 const returns = computed(() => {
   const nav = matchSeries(props.series, (key) => /^Q\d+$/.test(key));
   if (nav.length) return nav;
-  return prefixSeries(props.series, "quantile_returns_");
+  return prefixSeries(props.series, "quantile_returns_Q");
 });
+
+const afterCost = computed(() => prefixSeries(props.series, "quantile_returns_after_cost_"));
+
+const factorMean = computed(() => prefixSeries(props.series, "quantile_factor_mean_"));
 
 const extra = computed(() => {
   const rename = (key) =>
@@ -42,6 +46,8 @@ const extra = computed(() => {
 <template>
   <div class="stack">
     <ChartPanel title="分位净值" :traces="returns" />
+    <ChartPanel v-if="afterCost.length" title="分位费后收益" :traces="afterCost" />
+    <ChartPanel v-if="factorMean.length" title="分位因子均值" :traces="factorMean" />
     <ChartPanel title="分位 IC / 命中" :traces="extra" />
   </div>
 </template>

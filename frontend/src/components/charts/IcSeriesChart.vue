@@ -31,6 +31,7 @@ const traces = computed(() => {
     ["rolling_ic", "滚动 IC"],
     ["weighted_ic", "加权 IC"],
     ["nonlinear_ic", "非线性 IC"],
+    ["nonlinear_ic_ir", "非线性 IC IR"],
     ["mi_ic", "互信息 IC"],
   ];
   const seen = new Set();

@@ -82,6 +82,8 @@ def args_from_payload(payload: Mapping[str, Any]) -> SimpleNamespace:
         factor=_opt_str(payload.get("factor")),
         n=_opt_int(payload.get("n")),
         rebalance=_opt_str(payload.get("rebalance")) or "daily",
+        lookback=_opt_int(payload.get("lookback")),
+        horizon=_opt_int(payload.get("horizon")),
         hold=_opt_int(payload.get("hold")) if payload.get("hold") not in (None, "") else HOLD_N,
         anti_tail=_bool(payload.get("anti_tail")),
         allocator=str(payload.get("allocator") or "equal"),
@@ -272,6 +274,33 @@ def _strategy_fields(name: str) -> List[Dict[str, Any]]:
         return [
             {"key": "factor", "label": "因子", "type": "str", "required": True},
             {"key": "n", "label": "持仓数", "type": "int", "default": 50},
+            {
+                "key": "rebalance",
+                "label": "调仓频率",
+                "type": "str",
+                "default": "daily",
+                "placeholder": "daily / weekly / 5",
+            },
+        ]
+    if name == "multifactor":
+        return [
+            {
+                "key": "factor",
+                "label": "因子列表",
+                "type": "str",
+                "required": True,
+                "placeholder": "a,b,-c",
+            },
+            {"key": "n", "label": "持仓数", "type": "int", "default": 50},
+            {
+                "key": "rebalance",
+                "label": "调仓频率",
+                "type": "str",
+                "default": "daily",
+                "placeholder": "daily / weekly / 5",
+            },
+            {"key": "lookback", "label": "OLS回看天数", "type": "int", "default": 60},
+            {"key": "horizon", "label": "OLS持有期", "type": "int", "default": 5},
         ]
     return []
 
@@ -295,6 +324,8 @@ def _run_params(args) -> dict:
         "factor": args.factor,
         "n": args.n,
         "rebalance": getattr(args, "rebalance", "daily"),
+        "lookback": getattr(args, "lookback", None),
+        "horizon": getattr(args, "horizon", None),
         "hold": args.hold,
         "anti_tail": bool(args.anti_tail),
         "allocator_lookback": args.allocator_lookback,

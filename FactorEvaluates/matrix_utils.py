@@ -159,6 +159,7 @@ def quality_stats(factors: np.ndarray, extreme_threshold: float = 3.0) -> Dict[s
     return {
         "coverage_rate": coverage,
         "missing_rate": n_missing / n_total if n_total else np.full(p, np.nan),
+        "missing_samples": n_missing,
         "valid_samples": n_valid,
         "total_samples": np.full(p, n_total),
         "unique_count": unique_count,
@@ -347,6 +348,33 @@ def icir_row(daily: np.ndarray) -> np.ndarray:
     std = np.nanstd(daily, axis=0, ddof=1)
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(std > 0, mean / std, np.nan)[None, :]
+
+
+def expanding_icir(daily: np.ndarray) -> np.ndarray:
+    """逐日 expanding IR：``mean(IC_1..t) / std(IC_1..t, ddof=1)``。
+
+    ``daily`` 形状 ``(n_dates, n_factors)``，输出同形。
+    """
+    x = np.asarray(daily, dtype=np.float64)
+    if x.ndim == 1:
+        x = x[:, None]
+    n_dates, n_factors = x.shape
+    out = np.full((n_dates, n_factors), np.nan, dtype=np.float64)
+    count = np.zeros(n_factors, dtype=np.float64)
+    cumsum = np.zeros(n_factors, dtype=np.float64)
+    cumsum_sq = np.zeros(n_factors, dtype=np.float64)
+    for t in range(n_dates):
+        row = x[t]
+        valid = np.isfinite(row)
+        count[valid] += 1.0
+        cumsum[valid] += row[valid]
+        cumsum_sq[valid] += row[valid] ** 2
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean = cumsum / np.maximum(count, 1.0)
+            var = (cumsum_sq - cumsum * mean) / np.maximum(count - 1.0, 1.0)
+            ir = np.where((count > 1) & (var > 1e-30), mean / np.sqrt(var), np.nan)
+        out[t] = ir
+    return out
 
 
 def summarize_daily(series: pd.Series) -> Dict[str, float]:

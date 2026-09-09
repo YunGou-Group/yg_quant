@@ -19,6 +19,9 @@ const form = reactive({
   universe: "all",
   factor: "",
   n: null,
+  rebalance: "daily",
+  lookback: 60,
+  horizon: 5,
   hold: 6,
   anti_tail: false,
   allocator: "equal",
@@ -206,6 +209,9 @@ function applyDefaults(data) {
   form.benchmark = d.benchmark || "";
   form.hold = d.hold ?? 6;
   form.n = d.n ?? null;
+  form.rebalance = "daily";
+  form.lookback = 60;
+  form.horizon = 5;
   form.anti_tail = Boolean(d.anti_tail);
 }
 
@@ -234,6 +240,13 @@ function body() {
   if (fieldOf("factor")) payload.factor = form.factor || null;
   if (fieldOf("hold")) payload.hold = form.hold == null || form.hold === "" ? null : Number(form.hold);
   if (fieldOf("n") && form.n != null && form.n !== "") payload.n = Number(form.n);
+  if (fieldOf("rebalance")) payload.rebalance = form.rebalance || "daily";
+  if (fieldOf("lookback") && form.lookback != null && form.lookback !== "") {
+    payload.lookback = Number(form.lookback);
+  }
+  if (fieldOf("horizon") && form.horizon != null && form.horizon !== "") {
+    payload.horizon = Number(form.horizon);
+  }
   if (form.target_return != null && form.target_return !== "") {
     payload.target_return = Number(form.target_return);
   }
@@ -246,7 +259,7 @@ function body() {
 async function run() {
   if (fieldOf("factor") && !String(form.factor || "").trim()) {
     statusError.value = true;
-    status.value = "topk 需要填写因子名。";
+    status.value = "请填写因子名（multifactor 用逗号分隔，如 a,b,c）。";
     return;
   }
   const current = ++runToken;
@@ -493,8 +506,11 @@ onMounted(async () => {
         </select>
       </label>
       <label v-if="fieldOf('factor')" class="field">
-        因子
-        <input v-model="form.factor" placeholder="alpha001" />
+        {{ fieldOf("factor")?.label || "因子" }}
+        <input
+          v-model="form.factor"
+          :placeholder="fieldOf('factor')?.placeholder || 'alpha001'"
+        />
       </label>
       <label v-if="fieldOf('hold')" class="field">
         取到第 N 名
@@ -503,6 +519,29 @@ onMounted(async () => {
       <label v-if="fieldOf('n')" class="field">
         {{ fieldOf("n")?.label || "N" }}
         <input v-model.number="form.n" type="number" min="1" placeholder="默认" />
+      </label>
+      <label v-if="fieldOf('rebalance')" class="field">
+        {{ fieldOf("rebalance")?.label || "调仓频率" }}
+        <input
+          v-model="form.rebalance"
+          list="rebalance-opts"
+          :placeholder="fieldOf('rebalance')?.placeholder || 'daily / weekly / 5'"
+        />
+        <datalist id="rebalance-opts">
+          <option value="daily">日频</option>
+          <option value="weekly">周频（周五收盘）</option>
+          <option value="5">每 5 个交易日</option>
+          <option value="10">每 10 个交易日</option>
+          <option value="20">每 20 个交易日</option>
+        </datalist>
+      </label>
+      <label v-if="fieldOf('lookback')" class="field">
+        {{ fieldOf("lookback")?.label || "OLS回看天数" }}
+        <input v-model.number="form.lookback" type="number" min="5" placeholder="60" />
+      </label>
+      <label v-if="fieldOf('horizon')" class="field">
+        {{ fieldOf("horizon")?.label || "OLS持有期" }}
+        <input v-model.number="form.horizon" type="number" min="1" placeholder="5" />
       </label>
       <label v-if="fieldOf('anti_tail')" class="check">
         <input v-model="form.anti_tail" type="checkbox" />

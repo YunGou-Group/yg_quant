@@ -42,7 +42,7 @@ class NonlinearICMetric(BaseMetric):
     dimension = "预测力"
     description = "距离相关 dcor：捕捉 U 型等非线性预测关系；覆盖率过滤后最多 1000 样本"
     cost = "panel"
-    produces = ()
+    produces = ("daily_nonlinear_ic",)
     requires = ()
     _MAX_SAMPLES = 1000
 
@@ -79,6 +79,9 @@ class NonlinearICMetric(BaseMetric):
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
         daily = apply_daily_matrix(self, ctx, params)
+        series = daily.get("nonlinear_ic")
+        if series is not None:
+            ctx.intermediates["daily_nonlinear_ic"] = series
         return result_from_daily(daily, primary="nonlinear_ic", extra_scalars={"horizon": ctx.horizon})
 
 

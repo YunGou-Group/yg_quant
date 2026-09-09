@@ -154,3 +154,47 @@ class ExtremeValueRatioMetric(BaseMetric):
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
         daily = apply_daily_matrix(self, ctx, params)
         return result_from_daily(daily, primary="extreme_value_ratio", extra_scalars={"horizon": ctx.horizon})
+
+
+class MissingSamplesMetric(BaseMetric):
+    name = "missing_samples"
+    dimension = "暴露度"
+    description = "股票池内因子缺失样本绝对个数"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "暴露度", "日均缺失样本数", "每日缺失个数的平均"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        return {"missing_samples": quality_stats(batch_ctx.masked_factors())["missing_samples"]}
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = apply_daily_matrix(self, ctx, params)
+        return result_from_daily(daily, primary="missing_samples", extra_scalars={"horizon": ctx.horizon})
+
+
+class TotalSamplesMetric(BaseMetric):
+    name = "total_samples"
+    dimension = "暴露度"
+    description = "股票池当日样本总数（含缺失）"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "暴露度", "日均样本总数", "股票池每日股票数的平均"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        return {"total_samples": quality_stats(batch_ctx.masked_factors())["total_samples"]}
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = apply_daily_matrix(self, ctx, params)
+        return result_from_daily(daily, primary="total_samples", extra_scalars={"horizon": ctx.horizon})
