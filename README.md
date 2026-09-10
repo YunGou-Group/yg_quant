@@ -137,13 +137,14 @@ python -m FactorEvaluates.run_batch --start 2010-01-01 --xt
 ```powershell
 python -m StrategyEngine --mode backtest --start 2010-01-01 --factor alpha001 --n 50
 python -m StrategyEngine --mode backtest --strategy multifactor --factor alpha001,alpha002,-turnover --n 50
+python -m StrategyEngine --mode backtest --strategy icir --factor alpha001,alpha002 --n 50 --rebalance 20
 python -m StrategyEngine --mode backtest --strategy small_cap --start 2023-01-01
 python -m StrategyEngine --mode backtest --strategy small_cap --allocator min_vol
 python -m StrategyEngine --mode live --strategy small_cap --cash 500000 --account 资金账号
 python -m StrategyEngine --mode attribute --run small_cap_20260902_120000
 ```
 
-`--mode` 必填。`multifactor`：逗号分隔多因子，滚动截面 OLS（Fama–MacBeth）估因子权重后合成打分再 Top N；前缀 `-` 表示取负。可用 `--lookback` / `--horizon`（默认 60 / 5）。实盘写出 `data/strategy_runs/qmt_orders.json`，客户端脚本见 [`qmt_scripts/`](qmt_scripts/README.md)。归因读已有回测快照，不重跑策略。也可 `python -m StrategyEngine.attribution --run <快照id>`。
+`--mode` 必填。`multifactor`：逗号分隔多因子，滚动截面 OLS 估权重后 Top N。`icir`：滚动 RankIC 的 ICIR 加权合成后再 Top N（负 ICIR 置 0）。两者都可用 `--lookback` / `--horizon`（默认 60 / 5），前缀 `-` 表示取负。实盘写出 `data/strategy_runs/qmt_orders.json`，客户端脚本见 [`qmt_scripts/`](qmt_scripts/README.md)。归因读已有回测快照，不重跑策略。也可 `python -m StrategyEngine.attribution --run <快照id>`。
 
 **通用**
 
@@ -163,11 +164,11 @@ python -m StrategyEngine --mode attribute --run small_cap_20260902_120000
 
 | 参数 | 含义 |
 |------|------|
-| `--factor` | topk：单因子；`multifactor`：逗号列表（`-name` 取负） |
-| `--n` | topk / multifactor 持仓数，或小市值候选数 |
-| `--rebalance` | topk / multifactor：`daily`、`weekly`（周五收盘，T+1 成交），或 N 个交易日（`5` / `5d` / `every5`） |
-| `--lookback` | multifactor OLS 回归回看交易日，默认 60 |
-| `--horizon` | multifactor OLS 远期收益持有交易日，默认 5 |
+| `--factor` | topk：单因子；`multifactor` / `icir`：逗号列表（`-name` 取负） |
+| `--n` | topk / multifactor / icir 持仓数，或小市值候选数 |
+| `--rebalance` | topk / multifactor / icir：`daily`、`weekly`，或 N 个交易日（`5` / `20` / `every20`） |
+| `--lookback` | multifactor / icir 回看交易日，默认 60 |
+| `--horizon` | multifactor / icir 远期收益持有交易日，默认 5 |
 | `--hold` | 小市值：剔除最小后取到第 N 名，默认 `6` |
 | `--anti-tail` | 小市值防尾声 |
 

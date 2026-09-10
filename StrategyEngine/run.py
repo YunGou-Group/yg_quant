@@ -302,6 +302,26 @@ def _strategy_fields(name: str) -> List[Dict[str, Any]]:
             {"key": "lookback", "label": "OLS回看天数", "type": "int", "default": 60},
             {"key": "horizon", "label": "OLS持有期", "type": "int", "default": 5},
         ]
+    if name == "icir":
+        return [
+            {
+                "key": "factor",
+                "label": "因子列表",
+                "type": "str",
+                "required": True,
+                "placeholder": "a,b,-c",
+            },
+            {"key": "n", "label": "持仓数", "type": "int", "default": 50},
+            {
+                "key": "rebalance",
+                "label": "调仓频率",
+                "type": "str",
+                "default": "daily",
+                "placeholder": "daily / weekly / 20",
+            },
+            {"key": "lookback", "label": "ICIR回看天数", "type": "int", "default": 60},
+            {"key": "horizon", "label": "IC持有期", "type": "int", "default": 5},
+        ]
     return []
 
 
