@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""vol(i)/mean(vol(i-1)..vol(i-10)) * (-x)；x 为近 100 日收盘价高低分位 - 0.5。"""
+"""vol(i)/mean(vol(i-1)..vol(i-10)) * (-x)；x = sinh(k·u)，u 为近 100 日高低位。"""
 
 from __future__ import annotations
 
 from typing import List, Optional
 
+import numpy as np
 import pandas as pd
 
 from DailyUpdates.factor_updates.base_factor import BaseFactor
+
+# u∈[-1,1] 时 sinh 两端更陡且有界；1.5 时 |x|≤sinh(1.5)≈2.13
+_SINH_K = 1.5
 
 
 class VolRelMa5Factor(BaseFactor):
     name = "vol_rel_ma5"
     description = (
         "vol/前10日均量 * (-x)；"
-        "x=(close-min100)/(max100-min100)-0.5，低位为负、高位为正"
+        "u=2*(close-min100)/(max100-min100)-1，x=sinh(1.5·u)"
     )
     dependencies: List[str] = ["vol", "close"]
     role = "alpha"
@@ -35,8 +39,8 @@ class VolRelMa5Factor(BaseFactor):
         lo = g_close.transform(lambda s: s.rolling(100).min())
         hi = g_close.transform(lambda s: s.rolling(100).max())
         span = hi - lo
-        x = (df["close"] - lo) / span - 0.5
-        x = x.where(span > 0)
+        u = 2.0 * (df["close"] - lo) / span - 1.0
+        x = np.sinh(_SINH_K * u).where(span > 0)
 
         df["factor_value"] = (df["vol"] / ma10) * (-x)
 

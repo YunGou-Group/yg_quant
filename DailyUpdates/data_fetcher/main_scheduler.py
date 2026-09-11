@@ -39,327 +39,326 @@ def main():
     )
     db_path = str(default_db_path())
 
-    # Akshare 不需要 token；切回 Tushare 时再设 TUSHARE_TOKEN。
     tushare_token = os.getenv("TUSHARE_TOKEN", "").strip()
 
     end_date = os.getenv("YG_QUANT_END_DATE") or datetime.now().strftime("%Y%m%d")
-    # --- 当前启用：Akshare（验证用；全市场按股拉取，比 Tushare 慢很多）---
+    # 备用 Akshare（全市场按股拉取，比 Tushare 慢很多；验证时再解开）---
     # 可选限股票：在 daily / daily_basic / adj_factor / stk_limit / fina_indicator
     # 配置里加 'symbols': ['000001', '600000'] 做冒烟。
-    dataset_config = {
-        "daily": {
-            "data_source": "Akshare",
-            "data_type": "daily",
-            "api_name": "daily",
-            "fields": [
-                "ts_code",
-                "trade_date",
-                "open",
-                "high",
-                "low",
-                "close",
-                "pre_close",
-                "change",
-                "pct_chg",
-                "vol",
-                "amount",
-            ],
-            "primary_key": ["ts_code", "trade_date"],
-            "pause_seconds": 0.2,
-        },
-        "daily_basic": {
-            "data_source": "Akshare",
-            "data_type": "daily",
-            "api_name": "daily_basic",
-            "fields": ["ts_code", "trade_date", *DAILY_BASIC_BARRA_FIELDS],
-            "primary_key": ["ts_code", "trade_date"],
-            "pause_seconds": 0.2,
-        },
-        "index": {
-            "data_source": "Akshare",
-            "data_type": "index",
-            "api_name": "index_daily",
-            # 上证指数 / 深证成指 / 创业板指 / 沪深300
-            "index_list": ["000001.SH", "399001.SZ", "399006.SZ", "000300.SH"],
-            "fields": [
-                "ts_code",
-                "trade_date",
-                "open",
-                "high",
-                "low",
-                "close",
-                "pre_close",
-                "change",
-                "pct_chg",
-                "vol",
-                "amount",
-            ],
-            "primary_key": ["ts_code", "trade_date"],
-            "pause_seconds": 0.2,
-        },
-        "sw_industry_classify": {
-            "data_source": "Akshare",
-            "data_type": "industry",
-            "api_name": "index_classify",
-            "src": "SW2021",
-            "levels": ["L1", "L2", "L3"],
-            "fields": [
-                "index_code",
-                "industry_name",
-                "parent_code",
-                "level",
-                "industry_code",
-                "is_pub",
-                "src",
-            ],
-            "primary_key": ["src", "index_code"],
-        },
-        "sw_industry_member": {
-            "data_source": "Akshare",
-            "data_type": "industry",
-            "api_name": "index_member_all",
-            "src": "SW2021",
-            "fields": [
-                "l1_code",
-                "l1_name",
-                "l2_code",
-                "l2_name",
-                "l3_code",
-                "l3_name",
-                "ts_code",
-                "name",
-                "in_date",
-                "out_date",
-                "is_new",
-            ],
-            "primary_key": ["src", "ts_code", "l3_code", "in_date"],
-        },
-        "stock_basic": {
-            "data_source": "Akshare",
-            "data_type": "stock_info",
-            "api_name": "stock_basic",
-            "list_status": ["L", "D", "P"],
-            "fields": [
-                "ts_code",
-                "symbol",
-                "name",
-                "area",
-                "industry",
-                "market",
-                "list_date",
-                "delist_date",
-                "list_status",
-            ],
-            "primary_key": ["ts_code"],
-        },
-        "namechange": {
-            "data_source": "Akshare",
-            "data_type": "stock_info",
-            "api_name": "namechange",
-            "fields": [
-                "ts_code",
-                "name",
-                "start_date",
-                "end_date",
-                "ann_date",
-                "change_reason",
-            ],
-            "primary_key": ["ts_code", "start_date", "name"],
-            "pause_seconds": 0.2,
-        },
-        "fina_indicator": {
-            "data_source": "Akshare",
-            "data_type": "financial",
-            "api_name": "fina_indicator",
-            "pause_seconds": 0.35,
-            "fields": list(FINANCIAL_TUSHARE_FIELDS),
-            "primary_key": ["ts_code", "end_date", "ann_date", "update_flag"],
-        },
-        # 注意：Akshare 指数成分是中证官网最新快照，不是逐日调样历史。
-        "universe_index_weight": {
-            "data_source": "Akshare",
-            "data_type": "index_constituent",
-            "api_name": "index_weight",
-            "index_list": [
-                "000300.SH",
-                "000905.SH",
-                "000852.SH",
-                "000016.SH",
-                "399006.SZ",
-                "000985.SH",
-                "399101.SZ",
-                "000688.SH",
-            ],
-            "pause_seconds": 0.3,
-            "fields": ["index_code", "con_code", "trade_date", "weight"],
-            "primary_key": ["index_code", "con_code", "trade_date"],
-        },
-        "adj_factor": {
-            "data_source": "Akshare",
-            "data_type": "daily",
-            "api_name": "adj_factor",
-            "pause_seconds": 0.2,
-            "fields": ["ts_code", "trade_date", "adj_factor"],
-            "primary_key": ["ts_code", "trade_date"],
-        },
-        # Akshare 无历史涨跌停接口：由昨收 × 板块涨跌幅推算。
-        "stk_limit": {
-            "data_source": "Akshare",
-            "data_type": "daily",
-            "api_name": "stk_limit",
-            "optional": True,
-            "pause_seconds": 0.2,
-            "fields": ["ts_code", "trade_date", "up_limit", "down_limit"],
-            "primary_key": ["ts_code", "trade_date"],
-        },
-    }
-
-    # --- 备用：Tushare（验证完 Akshare 后可改回；勿删）---
-    # if not tushare_token:
-    #     raise RuntimeError("请先设置 TUSHARE_TOKEN 环境变量")
     # dataset_config = {
-    #     'daily': {
-    #         'data_source': 'Tushare',  # 数据源：Tushare
-    #         'data_type': 'daily',      # 数据类型：日频行情
-    #         'api_name': 'daily',       # API接口名：daily
-    #         'token': tushare_token,    # Tushare token
-    #         'fields': ['ts_code', 'trade_date','open', 'high', 'low', 'close', 'pre_close', 'change', 'pct_chg', 'vol', 'amount'],
-    #         'primary_key': ['ts_code', 'trade_date']
+    #     "daily": {
+    #         "data_source": "Akshare",
+    #         "data_type": "daily",
+    #         "api_name": "daily",
+    #         "fields": [
+    #             "ts_code",
+    #             "trade_date",
+    #             "open",
+    #             "high",
+    #             "low",
+    #             "close",
+    #             "pre_close",
+    #             "change",
+    #             "pct_chg",
+    #             "vol",
+    #             "amount",
+    #         ],
+    #         "primary_key": ["ts_code", "trade_date"],
+    #         "pause_seconds": 0.2,
     #     },
-    #     'daily_basic': {
-    #         'data_source': 'Tushare',  # 数据源：Tushare
-    #         'data_type': 'daily',      # 数据类型：日频数据
-    #         'api_name': 'daily_basic', # API接口名：daily_basic
-    #         'token': tushare_token,    # Tushare token
-    #         'fields': ['ts_code', 'trade_date', *DAILY_BASIC_BARRA_FIELDS],
-    #         'primary_key': ['ts_code', 'trade_date'],
-    #         'pause_seconds': 0.15,
+    #     "daily_basic": {
+    #         "data_source": "Akshare",
+    #         "data_type": "daily",
+    #         "api_name": "daily_basic",
+    #         "fields": ["ts_code", "trade_date", *DAILY_BASIC_BARRA_FIELDS],
+    #         "primary_key": ["ts_code", "trade_date"],
+    #         "pause_seconds": 0.2,
     #     },
-    #     'index': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'index',
-    #         'api_name': 'index_daily',
-    #         'token': tushare_token,
+    #     "index": {
+    #         "data_source": "Akshare",
+    #         "data_type": "index",
+    #         "api_name": "index_daily",
     #         # 上证指数 / 深证成指 / 创业板指 / 沪深300
-    #         'index_list': ['000001.SH', '399001.SZ', '399006.SZ', '000300.SH'],
-    #         'fields': [
-    #             'ts_code', 'trade_date',
-    #             'open', 'high', 'low', 'close',
-    #             'pre_close', 'change', 'pct_chg', 'vol', 'amount',
+    #         "index_list": ["000001.SH", "399001.SZ", "399006.SZ", "000300.SH"],
+    #         "fields": [
+    #             "ts_code",
+    #             "trade_date",
+    #             "open",
+    #             "high",
+    #             "low",
+    #             "close",
+    #             "pre_close",
+    #             "change",
+    #             "pct_chg",
+    #             "vol",
+    #             "amount",
     #         ],
-    #         'primary_key': ['ts_code', 'trade_date'],
+    #         "primary_key": ["ts_code", "trade_date"],
+    #         "pause_seconds": 0.2,
     #     },
-    #     # 申万行业分类：https://tushare.pro/document/2?doc_id=181
-    #     'sw_industry_classify': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'industry',
-    #         'api_name': 'index_classify',
-    #         'token': tushare_token,
-    #         'src': 'SW2021',
-    #         'levels': ['L1', 'L2', 'L3'],
-    #         'fields': [
-    #             'index_code', 'industry_name', 'parent_code',
-    #             'level', 'industry_code', 'is_pub', 'src',
+    #     "sw_industry_classify": {
+    #         "data_source": "Akshare",
+    #         "data_type": "industry",
+    #         "api_name": "index_classify",
+    #         "src": "SW2021",
+    #         "levels": ["L1", "L2", "L3"],
+    #         "fields": [
+    #             "index_code",
+    #             "industry_name",
+    #             "parent_code",
+    #             "level",
+    #             "industry_code",
+    #             "is_pub",
+    #             "src",
     #         ],
-    #         'primary_key': ['src', 'index_code'],
+    #         "primary_key": ["src", "index_code"],
     #     },
-    #     # 申万行业成分：https://tushare.pro/document/2?doc_id=335
-    #     # is_new 缺省时源会显式拉 Y+N（Tushare 默认 Y，不传拿不到调出历史）。
-    #     # 写入时按 src 整表替换，无需手删库。
-    #     'sw_industry_member': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'industry',
-    #         'api_name': 'index_member_all',
-    #         'token': tushare_token,
-    #         'src': 'SW2021',
-    #         'fields': [
-    #             'l1_code', 'l1_name', 'l2_code', 'l2_name',
-    #             'l3_code', 'l3_name', 'ts_code', 'name',
-    #             'in_date', 'out_date', 'is_new',
+    #     "sw_industry_member": {
+    #         "data_source": "Akshare",
+    #         "data_type": "industry",
+    #         "api_name": "index_member_all",
+    #         "src": "SW2021",
+    #         "fields": [
+    #             "l1_code",
+    #             "l1_name",
+    #             "l2_code",
+    #             "l2_name",
+    #             "l3_code",
+    #             "l3_name",
+    #             "ts_code",
+    #             "name",
+    #             "in_date",
+    #             "out_date",
+    #             "is_new",
     #         ],
-    #         'primary_key': ['src', 'ts_code', 'l3_code', 'in_date'],
+    #         "primary_key": ["src", "ts_code", "l3_code", "in_date"],
     #     },
-    #     # 股票基础信息（ST / 上市日 / 退市日）：https://tushare.pro/document/2?doc_id=25
-    #     # 入库主键用 ts_code → 仓库代码（SZ000001），不用 Tushare 六位 symbol 字段
-    #     'stock_basic': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'stock_info',
-    #         'api_name': 'stock_basic',
-    #         'token': tushare_token,
-    #         'list_status': ['L', 'D', 'P'],
-    #         'fields': [
-    #             'ts_code', 'symbol', 'name', 'area',
-    #             'industry', 'market', 'list_date', 'delist_date', 'list_status',
+    #     "stock_basic": {
+    #         "data_source": "Akshare",
+    #         "data_type": "stock_info",
+    #         "api_name": "stock_basic",
+    #         "list_status": ["L", "D", "P"],
+    #         "fields": [
+    #             "ts_code",
+    #             "symbol",
+    #             "name",
+    #             "area",
+    #             "industry",
+    #             "market",
+    #             "list_date",
+    #             "delist_date",
+    #             "list_status",
     #         ],
-    #         'primary_key': ['ts_code'],
+    #         "primary_key": ["ts_code"],
     #     },
-    #     # 历史名称变更：https://tushare.pro/document/2?doc_id=100
-    #     # 用于按 asof 判断当时是否 ST，而不是拿今天的名字回溯历史。
-    #     'namechange': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'stock_info',
-    #         'api_name': 'namechange',
-    #         'token': tushare_token,
-    #         'fields': [
-    #             'ts_code', 'name', 'start_date', 'end_date',
-    #             'ann_date', 'change_reason',
+    #     "namechange": {
+    #         "data_source": "Akshare",
+    #         "data_type": "stock_info",
+    #         "api_name": "namechange",
+    #         "fields": [
+    #             "ts_code",
+    #             "name",
+    #             "start_date",
+    #             "end_date",
+    #             "ann_date",
+    #             "change_reason",
     #         ],
-    #         'primary_key': ['ts_code', 'start_date', 'name'],
+    #         "primary_key": ["ts_code", "start_date", "name"],
+    #         "pause_seconds": 0.2,
     #     },
-    #     # 财务指标（按季）：Barra10 Growth/Leverage/EY 描述子；PIT 用 ann_date
-    #     'fina_indicator': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'financial',
-    #         'api_name': 'fina_indicator_vip',
-    #         'token': tushare_token,
-    #         'use_vip': True,
-    #         'pause_seconds': 1.0,
-    #         'fields': list(FINANCIAL_TUSHARE_FIELDS),
-    #         # 同报告期可并存首发/更正两行（update_flag 区分），禁止 keep=last 覆盖
-    #         'primary_key': ['ts_code', 'end_date', 'ann_date', 'update_flag'],
+    #     "fina_indicator": {
+    #         "data_source": "Akshare",
+    #         "data_type": "financial",
+    #         "api_name": "fina_indicator",
+    #         "pause_seconds": 0.35,
+    #         "fields": list(FINANCIAL_TUSHARE_FIELDS),
+    #         "primary_key": ["ts_code", "end_date", "ann_date", "update_flag"],
     #     },
-    #     # 股票池指数成分（asof，禁止用最新快照回溯）
-    #     'universe_index_weight': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'index_constituent',
-    #         'api_name': 'index_weight',
-    #         'token': tushare_token,
-    #         'index_list': [
-    #             '000300.SH',
-    #             '000905.SH',
-    #             '000852.SH',
-    #             '000016.SH',
-    #             '399006.SZ',
-    #             '000985.SH',  # 请求 000985.CSI，入库仍用此代码（对 zzhz）
-    #             '399101.SZ',
-    #             '000688.SH',
+    #     # 注意：Akshare 指数成分是中证官网最新快照，不是逐日调样历史。
+    #     "universe_index_weight": {
+    #         "data_source": "Akshare",
+    #         "data_type": "index_constituent",
+    #         "api_name": "index_weight",
+    #         "index_list": [
+    #             "000300.SH",
+    #             "000905.SH",
+    #             "000852.SH",
+    #             "000016.SH",
+    #             "399006.SZ",
+    #             "000985.SH",
+    #             "399101.SZ",
+    #             "000688.SH",
     #         ],
-    #         'pause_seconds': 0.2,
-    #         'fields': ['index_code', 'con_code', 'trade_date', 'weight'],
-    #         'primary_key': ['index_code', 'con_code', 'trade_date'],
+    #         "pause_seconds": 0.3,
+    #         "fields": ["index_code", "con_code", "trade_date", "weight"],
+    #         "primary_key": ["index_code", "con_code", "trade_date"],
     #     },
-    #     # 复权因子（写入 market_data）：后复权价 = 原始价 × adj_factor
-    #     # 历史值不随后续分红变化，因此增量入库与 Bin 因子轴都安全。
-    #     'adj_factor': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'daily',
-    #         'api_name': 'adj_factor',
-    #         'token': tushare_token,
-    #         'pause_seconds': 0.12,
-    #         'fields': ['ts_code', 'trade_date', 'adj_factor'],
-    #         'primary_key': ['ts_code', 'trade_date'],
+    #     "adj_factor": {
+    #         "data_source": "Akshare",
+    #         "data_type": "daily",
+    #         "api_name": "adj_factor",
+    #         "pause_seconds": 0.2,
+    #         "fields": ["ts_code", "trade_date", "adj_factor"],
+    #         "primary_key": ["ts_code", "trade_date"],
     #     },
-    #     # 涨跌停价（写入 market_data）。Tushare 早期交易日经常无此表，空则跳过，不挡日线。
-    #     'stk_limit': {
-    #         'data_source': 'Tushare',
-    #         'data_type': 'daily',
-    #         'api_name': 'stk_limit',
-    #         'token': tushare_token,
-    #         'optional': True,
-    #         'fields': ['ts_code', 'trade_date', 'up_limit', 'down_limit'],
-    #         'primary_key': ['ts_code', 'trade_date'],
+    #     # Akshare 无历史涨跌停接口：由昨收 × 板块涨跌幅推算。
+    #     "stk_limit": {
+    #         "data_source": "Akshare",
+    #         "data_type": "daily",
+    #         "api_name": "stk_limit",
+    #         "optional": True,
+    #         "pause_seconds": 0.2,
+    #         "fields": ["ts_code", "trade_date", "up_limit", "down_limit"],
+    #         "primary_key": ["ts_code", "trade_date"],
     #     },
     # }
+
+    # --- 当前启用：Tushare ---
+    if not tushare_token:
+        raise RuntimeError("请先设置 TUSHARE_TOKEN 环境变量")
+    dataset_config = {
+        'daily': {
+            'data_source': 'Tushare',  # 数据源：Tushare
+            'data_type': 'daily',      # 数据类型：日频行情
+            'api_name': 'daily',       # API接口名：daily
+            'token': tushare_token,    # Tushare token
+            'fields': ['ts_code', 'trade_date','open', 'high', 'low', 'close', 'pre_close', 'change', 'pct_chg', 'vol', 'amount'],
+            'primary_key': ['ts_code', 'trade_date']
+        },
+        'daily_basic': {
+            'data_source': 'Tushare',  # 数据源：Tushare
+            'data_type': 'daily',      # 数据类型：日频数据
+            'api_name': 'daily_basic', # API接口名：daily_basic
+            'token': tushare_token,    # Tushare token
+            'fields': ['ts_code', 'trade_date', *DAILY_BASIC_BARRA_FIELDS],
+            'primary_key': ['ts_code', 'trade_date'],
+            'pause_seconds': 0.15,
+        },
+        'index': {
+            'data_source': 'Tushare',
+            'data_type': 'index',
+            'api_name': 'index_daily',
+            'token': tushare_token,
+            # 上证指数 / 深证成指 / 创业板指 / 沪深300
+            'index_list': ['000001.SH', '399001.SZ', '399006.SZ', '000300.SH'],
+            'fields': [
+                'ts_code', 'trade_date',
+                'open', 'high', 'low', 'close',
+                'pre_close', 'change', 'pct_chg', 'vol', 'amount',
+            ],
+            'primary_key': ['ts_code', 'trade_date'],
+        },
+        # 申万行业分类：https://tushare.pro/document/2?doc_id=181
+        'sw_industry_classify': {
+            'data_source': 'Tushare',
+            'data_type': 'industry',
+            'api_name': 'index_classify',
+            'token': tushare_token,
+            'src': 'SW2021',
+            'levels': ['L1', 'L2', 'L3'],
+            'fields': [
+                'index_code', 'industry_name', 'parent_code',
+                'level', 'industry_code', 'is_pub', 'src',
+            ],
+            'primary_key': ['src', 'index_code'],
+        },
+        # 申万行业成分：https://tushare.pro/document/2?doc_id=335
+        # is_new 缺省时源会显式拉 Y+N（Tushare 默认 Y，不传拿不到调出历史）。
+        # 写入时按 src 整表替换，无需手删库。
+        'sw_industry_member': {
+            'data_source': 'Tushare',
+            'data_type': 'industry',
+            'api_name': 'index_member_all',
+            'token': tushare_token,
+            'src': 'SW2021',
+            'fields': [
+                'l1_code', 'l1_name', 'l2_code', 'l2_name',
+                'l3_code', 'l3_name', 'ts_code', 'name',
+                'in_date', 'out_date', 'is_new',
+            ],
+            'primary_key': ['src', 'ts_code', 'l3_code', 'in_date'],
+        },
+        # 股票基础信息（ST / 上市日 / 退市日）：https://tushare.pro/document/2?doc_id=25
+        # 入库主键用 ts_code → 仓库代码（SZ000001），不用 Tushare 六位 symbol 字段
+        'stock_basic': {
+            'data_source': 'Tushare',
+            'data_type': 'stock_info',
+            'api_name': 'stock_basic',
+            'token': tushare_token,
+            'list_status': ['L', 'D', 'P'],
+            'fields': [
+                'ts_code', 'symbol', 'name', 'area',
+                'industry', 'market', 'list_date', 'delist_date', 'list_status',
+            ],
+            'primary_key': ['ts_code'],
+        },
+        # 历史名称变更：https://tushare.pro/document/2?doc_id=100
+        # 用于按 asof 判断当时是否 ST，而不是拿今天的名字回溯历史。
+        'namechange': {
+            'data_source': 'Tushare',
+            'data_type': 'stock_info',
+            'api_name': 'namechange',
+            'token': tushare_token,
+            'fields': [
+                'ts_code', 'name', 'start_date', 'end_date',
+                'ann_date', 'change_reason',
+            ],
+            'primary_key': ['ts_code', 'start_date', 'name'],
+        },
+        # 财务指标（按季）：Barra10 Growth/Leverage/EY 描述子；PIT 用 ann_date
+        'fina_indicator': {
+            'data_source': 'Tushare',
+            'data_type': 'financial',
+            'api_name': 'fina_indicator_vip',
+            'token': tushare_token,
+            'use_vip': True,
+            'pause_seconds': 1.0,
+            'fields': list(FINANCIAL_TUSHARE_FIELDS),
+            # 同报告期可并存首发/更正两行（update_flag 区分），禁止 keep=last 覆盖
+            'primary_key': ['ts_code', 'end_date', 'ann_date', 'update_flag'],
+        },
+        # 股票池指数成分（asof，禁止用最新快照回溯）
+        'universe_index_weight': {
+            'data_source': 'Tushare',
+            'data_type': 'index_constituent',
+            'api_name': 'index_weight',
+            'token': tushare_token,
+            'index_list': [
+                '000300.SH',
+                '000905.SH',
+                '000852.SH',
+                '000016.SH',
+                '399006.SZ',
+                '000985.SH',  # 请求 000985.CSI，入库仍用此代码（对 zzhz）
+                '399101.SZ',
+                '000688.SH',
+            ],
+            'pause_seconds': 0.2,
+            'fields': ['index_code', 'con_code', 'trade_date', 'weight'],
+            'primary_key': ['index_code', 'con_code', 'trade_date'],
+        },
+        # 复权因子（写入 market_data）：后复权价 = 原始价 × adj_factor
+        # 历史值不随后续分红变化，因此增量入库与 Bin 因子轴都安全。
+        'adj_factor': {
+            'data_source': 'Tushare',
+            'data_type': 'daily',
+            'api_name': 'adj_factor',
+            'token': tushare_token,
+            'pause_seconds': 0.12,
+            'fields': ['ts_code', 'trade_date', 'adj_factor'],
+            'primary_key': ['ts_code', 'trade_date'],
+        },
+        # 涨跌停价（写入 market_data）。Tushare 早期交易日经常无此表，空则跳过，不挡日线。
+        'stk_limit': {
+            'data_source': 'Tushare',
+            'data_type': 'daily',
+            'api_name': 'stk_limit',
+            'token': tushare_token,
+            'optional': True,
+            'fields': ['ts_code', 'trade_date', 'up_limit', 'down_limit'],
+            'primary_key': ['ts_code', 'trade_date'],
+        },
+    }
 
     logger = logging.getLogger("main_scheduler")
     scheduler = UnifiedScheduler(db_path=db_path)
