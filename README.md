@@ -1,12 +1,24 @@
+<div align="center">
+
 # yg_quant
 
-A 股日频多因子研究平台：因子评估、回测与归因，并可对接迅投 QMT 实盘。
+**A 股日频多因子研究与组合回测平台**
+
+从行情入库、因子计算、网页评估，到约束组合回测、归因和迅投 QMT 实盘桥接。
 
 仅供研究使用，不构成投资建议。
 
-从行情入库、算因子、网页评估，到回测和归因。实盘把同一套 `score` 写成 QMT 可读的 JSON。内置小市值策略作参考：周五收盘给名单，下个交易日开盘成交；因子 TopK策略仅作为策略实现的演示。
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](requirements.txt)
+[![pip](https://img.shields.io/badge/package%20manager-pip-blue)](requirements.txt)
+[![status](https://img.shields.io/badge/status-research%20only-orange)](#)
+[![primary](https://img.shields.io/badge/primary-A--share%20long--only-informational)](#)
 
-Python 3.10–3.12。MIT，见 [LICENSE](LICENSE)。
+[安装](#安装) · [更新行情](#更新行情) · [更新因子](#更新因子) · [网页](#网页) · [因子评估](#因子评估) · [股票池](#股票池) · [策略回测](#策略回测) · [可拓展](#可拓展) · [贡献指南](CONTRIBUTING.md)
+
+</div>
+
+实盘把同一套 `score` 写成 QMT 可读的 JSON。内置小市值策略作参考：周五收盘给名单，下个交易日开盘成交；因子 TopK 仅作为策略实现的演示。入口一律 `python -m`，各命令加 `--help` 可看当前参数。
 
 ## 效果展示
 
@@ -38,8 +50,6 @@ Python 3.10–3.12。MIT，见 [LICENSE](LICENSE)。
 | `Strategies` | 策略 |
 | `Universes` | 股票池 |
 | `qmt_scripts` | 拷进迅投 QMT 的脚本 |
-
-入口用 `python -m`。各命令加 `--help` 可看当前参数。
 
 ## 安装
 
