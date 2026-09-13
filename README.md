@@ -28,7 +28,11 @@
 
 **深度报告**
 
-![深度报告](docs/screenshots/factor-detail.jpg)
+![深度报告](docs/screenshots/factor-detail-1.png)
+
+![深度报告分层](docs/screenshots/factor-detail-2.png)
+
+![深度报告多空](docs/screenshots/factor-detail-3.png)
 
 **策略回测**
 
@@ -36,7 +40,9 @@
 
 **业绩归因**
 
-![业绩归因](docs/screenshots/attribution.jpg)
+![收益树](docs/screenshots/attribution-tree.png)
+
+![十风格贡献](docs/screenshots/attribution-style.png)
 
 ## 目录
 
