@@ -94,13 +94,28 @@ def _industry_dummy_panels(
     return panels, tuple(names), label_map, ref_code
 
 
+def _as_date_index(index: pd.Index) -> pd.Index:
+    return pd.Index(pd.to_datetime(index).strftime("%Y-%m-%d"))
+
+
+def _as_str_index(index: pd.Index) -> pd.Index:
+    return pd.Index([str(col) for col in index])
+
+
 def _align(
     frame: pd.DataFrame, index: pd.Index, columns: pd.Index
 ) -> pd.DataFrame:
-    out = frame.copy()
-    out.index = pd.to_datetime(out.index).strftime("%Y-%m-%d")
-    out.columns = [str(col) for col in out.columns]
-    return out.reindex(index=index, columns=columns)
+    target_index = pd.Index(index)
+    target_columns = pd.Index(columns)
+    if frame.index.equals(target_index) and frame.columns.equals(target_columns):
+        return frame
+    src_index = _as_date_index(frame.index)
+    src_columns = _as_str_index(frame.columns)
+    values = frame.to_numpy(copy=False)
+    if src_index.equals(target_index) and src_columns.equals(target_columns):
+        return pd.DataFrame(values, index=target_index, columns=target_columns)
+    located = pd.DataFrame(values, index=src_index, columns=src_columns)
+    return located.reindex(index=target_index, columns=target_columns)
 
 
 def _finite_mask(arr: np.ndarray) -> np.ndarray:
@@ -183,11 +198,25 @@ class ExposureMatrix:
     industry_ref: Optional[str] = None
 
     def align(self, index: pd.Index, columns: pd.Index) -> "ExposureMatrix":
+        target_index = pd.Index(index)
+        target_columns = pd.Index(columns)
+
+        def _same(frame: Optional[pd.DataFrame]) -> bool:
+            return frame is None or (
+                frame.index.equals(target_index)
+                and frame.columns.equals(target_columns)
+            )
+
+        if all(_same(frame) for frame in self.panels.values()) and _same(self.weights):
+            return self
         panels = {
-            name: _align(frame, index, columns) for name, frame in self.panels.items()
+            name: _align(frame, target_index, target_columns)
+            for name, frame in self.panels.items()
         }
         weight_frame = (
-            _align(self.weights, index, columns) if self.weights is not None else None
+            _align(self.weights, target_index, target_columns)
+            if self.weights is not None
+            else None
         )
         return ExposureMatrix(
             panels=panels,
@@ -310,20 +339,25 @@ class ExposureEngine:
         每天在进入回归的股票上对因子做等权 z-score，再对已标准化的 X_T 回归。
         β 是「因子 1σ / 风格 1σ」，跨因子可比；残差也在 z 空间，供纯化 RankIC。
         """
-        factor_n = factor.copy()
-        factor_n.index = pd.to_datetime(factor_n.index).strftime("%Y-%m-%d")
-        factor_n.columns = [str(c) for c in factor_n.columns]
-        dates = factor_n.index
-        symbols = factor_n.columns
+        dates = _as_date_index(factor.index)
+        symbols = _as_str_index(factor.columns)
+        factor_n = _align(factor, dates, symbols)
         aligned = exposures.align(dates, symbols)
-        y = factor_n.to_numpy(dtype=np.float64)
+        y = np.asarray(factor_n.to_numpy(dtype=np.float64, copy=False))
         if mask is None:
             m = np.isfinite(y)
         else:
-            m = _align(mask.astype(float), dates, symbols).fillna(0).to_numpy() > 0
+            mask_arr = np.asarray(_align(mask, dates, symbols).to_numpy(copy=False))
+            if mask_arr.dtype == bool:
+                m = mask_arr
+            else:
+                m = np.isfinite(mask_arr) & (mask_arr != 0)
             m = m & np.isfinite(y)
         style_names = [name for name in aligned.names if name in aligned.panels]
-        cols = [aligned.panels[name].to_numpy(dtype=np.float64) for name in style_names]
+        cols = [
+            np.asarray(aligned.panels[name].to_numpy(dtype=np.float64, copy=False))
+            for name in style_names
+        ]
         beta_names = ["intercept", *style_names]
         beta_mat = np.full((y.shape[0], len(beta_names)), np.nan, dtype=np.float64)
         out = np.full(y.shape, np.nan, dtype=np.float64)
