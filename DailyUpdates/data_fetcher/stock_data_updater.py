@@ -311,19 +311,35 @@ class StockDataUpdater:
             return True
         start_ymd = str(days[0]).replace("-", "")
         end_ymd = str(days[-1]).replace("-", "")
+        today = datetime.date.today().strftime("%Y%m%d")
         if self._market_uses_range_window():
             written = self._upsert_range(start_ymd, end_ymd)
             if written <= 0:
+                if all(
+                    "".join(ch for ch in str(d) if ch.isdigit())[:8] >= today
+                    for d in days
+                ):
+                    logger.info(
+                        "%s ~ %s 日线未就绪，跳过（不视为失败）", start_ymd, end_ymd
+                    )
+                    return True
                 logger.error(
                     "%s ~ %s 有 %s 个交易日但写入 0 行", start_ymd, end_ymd, len(days)
                 )
                 return False
             return True
         failed = []
+        skipped_unready = []
         for trade_date in tqdm(days, desc="行情写入"):
             ymd = str(trade_date).replace("-", "")
             if self.update_all_stock_by_trade_day(ymd) <= 0:
-                failed.append(trade_date)
+                if ymd >= today:
+                    skipped_unready.append(trade_date)
+                    logger.info("%s 日线未就绪，跳过（不视为失败）", ymd)
+                else:
+                    failed.append(trade_date)
+        if skipped_unready:
+            logger.info("未就绪交易日已跳过: %s", skipped_unready)
         if failed:
             logger.error("预期交易日写入 0 行: %s", failed)
             return False

@@ -15,6 +15,14 @@ from DailyUpdates.data_fetcher.data_source_base import DataSourceBase
 _SIDECAR_TYPES = {"industry", "stock_info", "financial", "index_constituent"}
 
 
+def daily_bars_unready(dataset_config: Dict, empty_required: list) -> bool:
+    """配置了必填 daily 且拉空：盘中/收盘后未落库。复权、涨跌停可能先到，不能当完整行情写。"""
+    daily_cfg = dataset_config.get("daily")
+    if not daily_cfg or daily_cfg.get("optional"):
+        return False
+    return "daily" in empty_required
+
+
 @lru_cache(maxsize=1)
 def discover_data_source_classes() -> Dict[str, Type[DataSourceBase]]:
     """扫描 data_sources 目录，键为类名去掉 DataSource 后缀。"""
@@ -125,6 +133,13 @@ class DataFetcher:
             print(f"数据集 {dataset_name} 获取到 {len(df)} 条记录")
 
         if empty_required:
+            if daily_bars_unready(dataset_config, empty_required):
+                extras = [n for n in dataset_dfs if n != "daily"]
+                print(
+                    f"{start_date} 日线未就绪，不写入残缺行情"
+                    + (f"（已忽略先到的 {extras}）" if extras else "")
+                )
+                return {}
             raise RuntimeError(
                 f"{start_date} ~ {end_date} 以下数据集为空，拒绝写入残缺行情: "
                 f"{empty_required}（确认为非交易日或数据源确实无数据时，"
