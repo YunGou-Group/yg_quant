@@ -244,6 +244,30 @@ def register(app: FastAPI, state: WebState) -> None:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/api/library")
+    def api_library(run_id: Optional[str] = None) -> Dict[str, Any]:
+        from FactorEvaluates.query.library import library_overview
+
+        try:
+            return library_overview(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/library/corr")
+    def api_library_corr(
+        factors: str,
+        run_id: Optional[str] = None,
+        metric: str = "factor_corr",
+    ) -> Dict[str, Any]:
+        from FactorEvaluates.query.library import library_corr_subset
+
+        try:
+            return library_corr_subset(run_id, factors=factors, metric=metric)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/factors/{factor_name}")
     def api_factor(factor_name: str, run_id: Optional[str] = None) -> Dict[str, Any]:
         from FactorEvaluates.query.factors import available_metrics, factor_summary

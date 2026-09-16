@@ -134,6 +134,19 @@ export async function fetchFactorTable(runId) {
   return fetchJson(`/api/factors${q}`);
 }
 
+export async function fetchLibrary(runId) {
+  const q = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+  return fetchJson(`/api/library${q}`);
+}
+
+export async function fetchLibraryCorr(runId, factors, metric = "factor_corr") {
+  const params = new URLSearchParams();
+  if (runId) params.set("run_id", runId);
+  params.set("metric", metric || "factor_corr");
+  params.set("factors", Array.isArray(factors) ? factors.join(",") : String(factors || ""));
+  return fetchJson(`/api/library/corr?${params}`);
+}
+
 export async function fetchFactorDetail(name, runId) {
   const q = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
   return fetchJson(`/api/factors/${encodeURIComponent(name)}${q}`);

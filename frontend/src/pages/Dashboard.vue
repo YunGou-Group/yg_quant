@@ -2,7 +2,8 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter, RouterLink } from "vue-router";
 import ChartPanel from "../components/charts/ChartPanel.vue";
-import { fetchFactorTable } from "../api.js";
+import FactorLibraryCorr from "../components/FactorLibraryCorr.vue";
+import { fetchFactorTable, fetchLibrary } from "../api.js";
 import { colLabel } from "../columns.js";
 import { fmt } from "../format.js";
 import { useRunWorkspace } from "../runWorkspace.js";
@@ -12,6 +13,7 @@ const { runId, current, runLink } = useRunWorkspace();
 const error = ref("");
 const items = ref([]);
 const columns = ref([]);
+const library = ref(null);
 const coverageMin = ref(0);
 const search = ref("");
 const sortKey = ref("rank_ic_ir");
@@ -87,20 +89,27 @@ const topIr = computed(() => {
 
 async function load() {
   error.value = "";
+  library.value = null;
   if (!runId.value) {
     items.value = [];
     columns.value = [];
+    library.value = { items: {}, library_metrics: [] };
     return;
   }
   try {
-    const data = await fetchFactorTable(runId.value);
+    const [data, lib] = await Promise.all([
+      fetchFactorTable(runId.value),
+      fetchLibrary(runId.value).catch(() => ({ items: {}, library_metrics: [] })),
+    ]);
     items.value = data.items || [];
     columns.value = data.columns || [];
+    library.value = lib;
     if (!columns.value.includes(sortKey.value) && columns.value.includes("rank_ic_mean")) {
       sortKey.value = "rank_ic_mean";
     }
   } catch (err) {
     error.value = String(err.message || err);
+    library.value = { items: {}, library_metrics: [] };
   }
 }
 
@@ -157,6 +166,7 @@ watch(runId, load);
       <ChartPanel title="覆盖率 vs RankIC" :traces="scatter" :height="380" />
       <ChartPanel title="RankIC IR Top15" :traces="topIr" :height="380" />
     </div>
+    <FactorLibraryCorr :payload="library" :suggested-names="shown.map((row) => row.factor_name)" />
     <div class="table-wrap">
       <table>
         <thead>
