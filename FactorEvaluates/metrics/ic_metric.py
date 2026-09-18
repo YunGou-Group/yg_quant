@@ -12,13 +12,13 @@ from ..context import BatchEvalContext, EvalContext
 from ..field_doc import FieldDoc
 from ..metric_result import MetricResult
 from ..param_spec import HORIZON_PARAM, UNIVERSE_PARAM, ParamSpec
-from ..matrix_utils import pearson_pairwise, spearman_pairwise, summarize_daily
+from ..matrix_utils import pearson_pairwise, rank_ic_pairwise, summarize_daily
 
 MIN_OBS_PARAM = ParamSpec(
     name="min_obs",
     type="int",
     label="每日最少有效股票数",
-    default=20,
+    default=10,
     min=3,
     max=500,
     scope="metric",
@@ -54,7 +54,7 @@ class ICMetric(BaseMetric):
         return {"ic": pearson_pairwise(f, r, min_obs=min_obs)}
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
-        min_obs = int(params.get("min_obs", 20))
+        min_obs = int(params.get("min_obs", 10))
         calculator = CrossSectionICCalculator()
         series = calculator.daily_pearson_ic(
             ctx.masked_factor(), ctx.masked_fwd_ret(), min_obs=min_obs
@@ -104,10 +104,10 @@ class RankICMetric(BaseMetric):
         r = batch_ctx.masked_returns()
         if r is None:
             return {"rank_ic": np_nan(f)}
-        return {"rank_ic": spearman_pairwise(f, r, min_obs=min_obs)}
+        return {"rank_ic": rank_ic_pairwise(f, r, min_obs=min_obs)}
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
-        min_obs = int(params.get("min_obs", 20))
+        min_obs = int(params.get("min_obs", 10))
         calculator = CrossSectionICCalculator()
         series = calculator.daily_rank_ic(
             ctx.masked_factor(), ctx.masked_fwd_ret(), min_obs=min_obs

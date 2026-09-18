@@ -25,7 +25,6 @@ class SpearmanIntersectionTests(unittest.TestCase):
         n = 200
         factor = rng.normal(size=n)
         returns = rng.normal(size=n)
-        # 因子和收益各自缺失一部分，交集只有中间一段
         factor[:40] = np.nan
         returns[-40:] = np.nan
 
@@ -34,8 +33,7 @@ class SpearmanIntersectionTests(unittest.TestCase):
         want = stats.spearmanr(factor[both], returns[both]).statistic
         self.assertAlmostEqual(got, want, places=10)
 
-    def test_two_paths_agree(self):
-        """批量 spearman_pairwise 与单因子 CrossSectionICCalculator 必须同口径。"""
+    def test_rank_ic_matches_doc_rank_then_pairwise(self):
         rng = np.random.default_rng(11)
         n_days, n_stocks = 25, 120
         factor = rng.normal(size=(n_days, n_stocks))
@@ -45,32 +43,28 @@ class SpearmanIntersectionTests(unittest.TestCase):
 
         calc = CrossSectionICCalculator()
         single = calc.daily_rank_ic(
-            pd.DataFrame(factor), pd.DataFrame(fwd), min_obs=20
+            pd.DataFrame(factor), pd.DataFrame(fwd), min_obs=10
         ).to_numpy()
 
+        from FactorEvaluates.matrix_utils import rank_ic_pairwise
+
         batch = np.array(
-            [
-                spearman_pairwise(factor[t][:, None], fwd[t], min_obs=20)[0]
-                for t in range(n_days)
-            ]
+            [rank_ic_pairwise(factor[t], fwd[t], min_obs=10)[0] for t in range(n_days)]
         )
         np.testing.assert_allclose(single, batch, rtol=1e-9, atol=1e-12)
 
-    def test_full_set_ranking_would_differ(self):
-        """确认这不是个空断言：旧的各自全集排名会给出不同的值。"""
+    def test_rank_ic_differs_from_intersection_spearman(self):
         rng = np.random.default_rng(3)
         n = 150
         factor = rng.normal(size=n)
         returns = rng.normal(size=n)
         returns[:50] = np.nan
 
-        from FactorEvaluates.matrix_utils import pearson_pairwise, rank_cols
+        from FactorEvaluates.matrix_utils import rank_ic_pairwise
 
-        legacy = pearson_pairwise(
-            rank_cols(factor[:, None]), rank_cols(returns[:, None])[:, 0], min_obs=10
-        )[0]
-        fixed = spearman_pairwise(factor[:, None], returns, min_obs=10)[0]
-        self.assertNotAlmostEqual(legacy, fixed, places=6)
+        doc = rank_ic_pairwise(factor[:, None], returns, min_obs=10)[0]
+        intersection = spearman_pairwise(factor[:, None], returns, min_obs=10)[0]
+        self.assertNotAlmostEqual(doc, intersection, places=6)
 
 
 class CrossCorrTests(unittest.TestCase):

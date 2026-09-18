@@ -198,3 +198,47 @@ class TotalSamplesMetric(BaseMetric):
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
         daily = apply_daily_matrix(self, ctx, params)
         return result_from_daily(daily, primary="total_samples", extra_scalars={"horizon": ctx.horizon})
+
+
+class ValidSamplesMetric(BaseMetric):
+    name = "valid_samples"
+    dimension = "暴露度"
+    description = "股票池内因子有效样本数"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "暴露度", "日均有效样本数", "每日有限因子值个数的平均"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        return {"valid_samples": quality_stats(batch_ctx.masked_factors())["valid_samples"]}
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = apply_daily_matrix(self, ctx, params)
+        return result_from_daily(daily, primary="valid_samples", extra_scalars={"horizon": ctx.horizon})
+
+
+class UniqueCountMetric(BaseMetric):
+    name = "unique_count"
+    dimension = "暴露度"
+    description = "股票池内因子唯一值个数"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "暴露度", "日均唯一值数", "每日 unique 个数的平均"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        return {"unique_count": quality_stats(batch_ctx.masked_factors())["unique_count"]}
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = apply_daily_matrix(self, ctx, params)
+        return result_from_daily(daily, primary="unique_count", extra_scalars={"horizon": ctx.horizon})

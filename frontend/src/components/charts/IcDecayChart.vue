@@ -22,7 +22,7 @@ const bars = computed(() => {
 <template>
   <div class="stack">
     <ChartPanel title="IC 衰减（时序）" :traces="lines" />
-    <ChartPanel title="IC 衰减（各 horizon 均值）" :traces="bars" />
+    <ChartPanel title="IC 衰减（各 lag 均值）" :traces="bars" />
   </div>
 </template>
 

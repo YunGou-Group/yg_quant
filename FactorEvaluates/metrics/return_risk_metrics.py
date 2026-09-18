@@ -77,18 +77,26 @@ class LongOnlyReturnMetric(BaseMetric):
         f = batch_ctx.masked_factors()
         r = batch_ctx.masked_returns()
         p = f.shape[1]
-        nan = np.full(p, np.nan)
+        valid_f = np.isfinite(f)
+        long_cnt = (valid_f & (f > 0)).sum(axis=0).astype(np.float64)
+        short_cnt = (valid_f & (f < 0)).sum(axis=0).astype(np.float64)
         if r is None:
-            return {"long_only_return": nan, "short_only_return": nan, "long_count": nan, "short_count": nan}
-        valid = np.isfinite(f) & np.isfinite(r)[:, None]
+            nan = np.full(p, np.nan)
+            return {
+                "long_only_return": nan,
+                "short_only_return": nan,
+                "long_count": long_cnt,
+                "short_count": short_cnt,
+            }
+        valid = valid_f & np.isfinite(r)[:, None]
 
         def _leg(side):
             cnt = side.sum(axis=0)
             ret_sum = np.where(side, r[:, None], 0.0).sum(axis=0)
             return np.where(cnt >= MIN_OBS, ret_sum / np.maximum(cnt, 1), np.nan), cnt.astype(np.float64)
 
-        long_ret, long_cnt = _leg(valid & (f > 0))
-        short_ret, short_cnt = _leg(valid & (f < 0))
+        long_ret, _ = _leg(valid & (f > 0))
+        short_ret, _ = _leg(valid & (f < 0))
         return {
             "long_only_return": long_ret,
             "short_only_return": short_ret,
@@ -104,7 +112,7 @@ class LongOnlyReturnMetric(BaseMetric):
 class WeightedPnLMetric(BaseMetric):
     name = "weighted_pnl"
     dimension = "预测力"
-    description = "有效样本上 mean(f·r)；多头 mean(max(f,0)·r)，空头 mean((-min(f,0))·r)"
+    description = "有效样本上 Σ(f·r)；多头 Σ(max(f,0)·r)，空头 Σ((-min(f,0))·r)"
     cost = "panel"
     produces = ()
     requires = ()
@@ -123,24 +131,15 @@ class WeightedPnLMetric(BaseMetric):
             nan = np.full(p, np.nan)
             return {"weighted_pnl": nan, "weighted_long_pnl": nan, "weighted_short_pnl": nan}
         valid = np.isfinite(f) & np.isfinite(r)[:, None]
-        n = valid.sum(axis=0)
         contrib = np.where(valid, f * r[:, None], 0.0)
         long_m = valid & (f > 0)
         short_m = valid & (f < 0)
         long = np.where(long_m, f * r[:, None], 0.0)
         short = np.where(short_m, -f * r[:, None], 0.0)
-        n_long = long_m.sum(axis=0)
-        n_short = short_m.sum(axis=0)
-        pnl = np.full(p, np.nan)
-        long_pnl = np.full(p, np.nan)
-        short_pnl = np.full(p, np.nan)
-        np.divide(contrib.sum(axis=0), np.maximum(n, 1), out=pnl, where=n >= MIN_OBS)
-        np.divide(long.sum(axis=0), np.maximum(n_long, 1), out=long_pnl, where=n_long >= MIN_OBS)
-        np.divide(short.sum(axis=0), np.maximum(n_short, 1), out=short_pnl, where=n_short >= MIN_OBS)
         return {
-            "weighted_pnl": pnl,
-            "weighted_long_pnl": long_pnl,
-            "weighted_short_pnl": short_pnl,
+            "weighted_pnl": contrib.sum(axis=0),
+            "weighted_long_pnl": long.sum(axis=0),
+            "weighted_short_pnl": short.sum(axis=0),
         }
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
@@ -187,3 +186,30 @@ class FactorStyleCorrelationMetric(BaseMetric):
             primary="factor_style_correlation_style_size",
             extra_scalars={"horizon": ctx.horizon},
         )
+
+
+class LongCountMetric(BaseMetric):
+    name = "long_count"
+    dimension = "预测力"
+    description = "factor>0 / factor<0 的股票数，不依赖收益"
+    cost = "panel"
+    produces = ()
+    requires = ()
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM, UNIVERSE_PARAM)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (FieldDoc("mean", "预测力", "多头广度均值", "factor>0 日均股票数"),)
+
+    def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
+        f = batch_ctx.masked_factors()
+        valid = np.isfinite(f)
+        return {
+            "long_count": (valid & (f > 0)).sum(axis=0).astype(np.float64),
+            "short_count": (valid & (f < 0)).sum(axis=0).astype(np.float64),
+        }
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = apply_daily_matrix(self, ctx, params)
+        return result_from_daily(daily, primary="long_count", extra_scalars={"horizon": ctx.horizon})

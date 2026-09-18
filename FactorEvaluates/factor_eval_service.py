@@ -136,15 +136,6 @@ class FactorEvalService:
             if needs_raw:
                 extras["style_raw"] = raw
             print(f"[eval] X_T 完成 ({time.perf_counter() - t0:.1f}s)", flush=True)
-        if any(metric.get_name() == "ic_decay" for metric in ordered) and self._calculator is not None:
-            from .metrics.extra_ic_metrics import DECAY_HORIZONS
-
-            extras["fwd_ret_by_horizon"] = {}
-            for n in DECAY_HORIZONS:
-                fwd = self._calculator.get(int(n))
-                extras["fwd_ret_by_horizon"][int(n)] = fwd.reindex(
-                    index=factor.index, columns=factor.columns
-                )
         payload = self.evaluator.evaluate(
             factor,
             open_panel,

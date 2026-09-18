@@ -13,7 +13,7 @@ import numpy as np
 from ..context import BatchEvalContext
 from ..exposure_engine import RAW_STYLE_NAMES
 from ..metric_discoverer import MetricDiscoverer
-from ..matrix_utils import assign_quantiles, rank_cols, spearman_corr_matrix
+from ..matrix_utils import assign_quantiles, rank_cols_ordinal, spearman_corr_matrix
 from ..metrics.statistics_metrics import AUTOCORR_LAGS
 from .shared_mem import attach_pack, close_attached
 
@@ -211,7 +211,7 @@ def _size_day(
 def _full_day_ranks(cube: np.ndarray, mask: np.ndarray, t: int) -> np.ndarray:
     values = cube[t].astype(np.float64, copy=True)
     values[~mask[t]] = np.nan
-    return rank_cols(values)
+    return rank_cols_ordinal(values)
 
 
 def _warmup_rank_ring(

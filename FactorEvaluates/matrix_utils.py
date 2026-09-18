@@ -29,9 +29,43 @@ def rank_cols(values: np.ndarray) -> np.ndarray:
         m = int(valid.sum())
         if m < 2:
             continue
-        # pandas C 实现，比纯 Python argsort 循环快一个数量级
         out[valid, j] = pd.Series(col[valid]).rank(method="average").to_numpy(dtype=np.float64)
     return out[:, 0] if squeeze else out
+
+
+def rank_cols_ordinal(values: np.ndarray) -> np.ndarray:
+    """列内顺序秩（并列不平均），与 doc math_utils.rank_cols 一致。NaN 保持 NaN。"""
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr[:, None]
+        squeeze = True
+    else:
+        squeeze = False
+    n, p = arr.shape
+    out = np.full((n, p), np.nan, dtype=np.float64)
+    for j in range(p):
+        col = arr[:, j]
+        valid = ~np.isnan(col)
+        nv = int(valid.sum())
+        if nv < 2:
+            continue
+        vals = col[valid]
+        order = vals.argsort()
+        ranks = np.empty(nv, dtype=np.float64)
+        ranks[order] = np.arange(1, nv + 1, dtype=np.float64)
+        out[valid, j] = ranks
+    return out[:, 0] if squeeze else out
+
+
+def rank_1d_average(values: np.ndarray) -> np.ndarray:
+    """一维平均秩；非有限位置保持 NaN。"""
+    r = np.asarray(values, dtype=np.float64).reshape(-1)
+    out = np.full(r.shape, np.nan, dtype=np.float64)
+    valid = np.isfinite(r)
+    if int(valid.sum()) < 2:
+        return out
+    out[valid] = pd.Series(r[valid]).rank(method="average").to_numpy(dtype=np.float64)
+    return out
 
 
 def pearson_cols(left: np.ndarray, right: np.ndarray, min_obs: int = 10) -> np.ndarray:
@@ -86,12 +120,7 @@ def pearson_pairwise(factors: np.ndarray, returns: np.ndarray, min_obs: int = 10
 
 
 def spearman_pairwise(factors: np.ndarray, returns: np.ndarray, min_obs: int = 10) -> np.ndarray:
-    """factors (n, p) 与 returns (n,) 的列 Spearman（RankIC）。
-
-    排名只在「因子与收益都有效」的交集上做。各自在全集上排名再取交集算相关，
-    等价于把缺失样本挤占的名次留在序列里，会系统性压低 |IC|，且不同覆盖度的
-    因子之间不可比。
-    """
+    """组内 Spearman：先取因子与收益都有效的交集再排名。"""
     f = np.asarray(factors, dtype=np.float64)
     if f.ndim == 1:
         f = f[:, None]
@@ -102,22 +131,45 @@ def spearman_pairwise(factors: np.ndarray, returns: np.ndarray, min_obs: int = 1
     return pearson_cols(rank_cols(masked_f), rank_cols(masked_r), min_obs=min_obs)
 
 
+def rank_ic_pairwise(factors: np.ndarray, returns: np.ndarray, min_obs: int = 10) -> np.ndarray:
+    """截面 RankIC，与 doc RankIC 一致：因子在股票池内顺序排名，收益单独平均秩，再 Pearson。"""
+    f = np.asarray(factors, dtype=np.float64)
+    if f.ndim == 1:
+        f = f[:, None]
+    r = np.asarray(returns, dtype=np.float64).reshape(-1)
+    f_ranks = rank_cols_ordinal(f)
+    r_ranks = np.full(r.shape[0], np.nan, dtype=np.float64)
+    valid_r = np.isfinite(r)
+    if int(valid_r.sum()) >= min_obs:
+        r_ranks[valid_r] = pd.Series(r[valid_r]).rank(method="average").to_numpy(dtype=np.float64)
+    return pearson_pairwise(f_ranks, r_ranks, min_obs=min_obs)
+
+
 def assign_quantiles(factors: np.ndarray, n_q: int) -> np.ndarray:
-    """列内等频分位标签 1..n_q，无效为 0。"""
+    """列内等频分位 1..n_q：ceil(rank/N*n_q)，并列不平均。无效为 0。"""
     f = np.asarray(factors, dtype=np.float64)
     if f.ndim == 1:
         f = f[:, None]
         squeeze = True
     else:
         squeeze = False
-    ranks = rank_cols(f)
-    valid = np.isfinite(ranks)
-    count = valid.sum(axis=0)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        scaled = (ranks - 1.0) * n_q / np.maximum(count, 1)
-        labels = np.minimum(scaled, n_q - 1).astype(np.int32) + 1
-    out = np.where(valid & (count >= n_q), labels, 0).astype(np.int32)
-    return out[:, 0] if squeeze else out
+    n, p = f.shape
+    q = np.zeros((n, p), dtype=np.int32)
+    n_q = int(n_q)
+    for j in range(p):
+        col = f[:, j]
+        valid = ~np.isnan(col)
+        nv = int(valid.sum())
+        if nv < n_q:
+            continue
+        vals = col[valid]
+        order = vals.argsort()
+        ranks = np.empty(nv, dtype=np.float64)
+        ranks[order] = np.arange(1, nv + 1, dtype=np.float64)
+        bins = np.ceil(ranks / nv * n_q).astype(np.int32)
+        np.clip(bins, 1, n_q, out=bins)
+        q[valid, j] = bins
+    return q[:, 0] if squeeze else q
 
 
 def assign_quantiles_on_returns(
@@ -326,7 +378,7 @@ def causal_percentile(series: pd.Series, *, min_prior: int = 252) -> pd.Series:
 
 
 def rolling_nanmean(values: np.ndarray, window: int) -> np.ndarray:
-    """列向滚动均值；窗口内有效点不足 ``window`` 则为 NaN。"""
+    """列向滚动均值；窗口长度够了就对窗口做 nanmean，不要求窗口内全部有效。"""
     out = np.full(values.shape, np.nan, dtype=np.float64)
     if window <= 1:
         return values.astype(np.float64, copy=True)
@@ -338,8 +390,27 @@ def rolling_nanmean(values: np.ndarray, window: int) -> np.ndarray:
         lo = i - window
         s = csum[i] - (csum[lo] if lo >= 0 else 0)
         c = ccnt[i] - (ccnt[lo] if lo >= 0 else 0)
-        out[i] = np.where(c >= window, s / np.maximum(c, 1.0), np.nan)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out[i] = np.where(c > 0, s / np.maximum(c, 1.0), np.nan)
     return out
+
+
+def auto_direction_signs(
+    rank_ic: np.ndarray, *, lookback: int = 250, min_periods: int = 20
+) -> np.ndarray:
+    """第 t 日方向只用 [t-lookback, t) 的 RankIC；不足 min_periods 为 NaN；均值为 0 时 +1。"""
+    values = np.asarray(rank_ic, dtype=np.float64)
+    if values.ndim != 1:
+        raise ValueError("rank_ic 必须是一维数组")
+    signs = np.full(values.shape, np.nan, dtype=np.float64)
+    for pos in range(values.size):
+        start = max(0, pos - lookback)
+        finite = values[start:pos]
+        finite = finite[np.isfinite(finite)]
+        if finite.size < min_periods:
+            continue
+        signs[pos] = 1.0 if float(np.mean(finite)) >= 0.0 else -1.0
+    return signs
 
 
 def icir_row(daily: np.ndarray) -> np.ndarray:
@@ -442,8 +513,8 @@ def apply_daily_matrix(metric, ctx: EvalContext, params: Mapping) -> Dict[str, p
             barra=barra,
             size=size,
             date=str(factor.index[i]),
-            n_quantiles=int(params.get("n_quantiles", 5)),
-            min_obs=int(params.get("min_obs", 20)),
+            n_quantiles=int(params.get("n_quantiles", 10)),
+            min_obs=int(params.get("min_obs", 10)),
         )
         day = metric.compute_matrix(batch, params)
         for key, arr in day.items():

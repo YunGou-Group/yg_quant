@@ -173,7 +173,7 @@ class LongShortBarraExposureMetric(BaseMetric):
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
         daily = apply_daily_matrix(self, ctx, params)
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         direction = str(params.get("barra_direction", "linear"))
         # 交互路径：用日度 RankIC 均值定多空，再抽多空端序列
         arrays = {k: v.to_numpy(dtype=np.float64)[:, None] for k, v in daily.items()}
@@ -205,7 +205,7 @@ class LongShortBarraExposureMetric(BaseMetric):
     def compute_crossday(
         self, arrays: Mapping[str, Any], params: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         direction = str(params.get("barra_direction", "linear"))
         return _derive_long_short_series(
             arrays,
@@ -263,7 +263,7 @@ class BarraQuantileCorrelationMetric(BaseMetric):
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
         daily = apply_daily_matrix(self, ctx, params)
         ctx.intermediates["barra_quantile_correlation"] = True
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         return result_from_daily(
             daily,
             primary=f"barra_corr_Q{n_q}_style_size",
@@ -289,7 +289,7 @@ class LongShortBarraCorrMetric(BaseMetric):
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
         # 交互：先算分位相关，再派生
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         direction = str(params.get("barra_direction", "linear"))
         daily = apply_daily_matrix(BarraQuantileCorrelationMetric(), ctx, params)
         arrays = {k: v.to_numpy(dtype=np.float64)[:, None] for k, v in daily.items()}
@@ -324,7 +324,7 @@ class LongShortBarraCorrMetric(BaseMetric):
     def compute_crossday(
         self, arrays: Mapping[str, Any], params: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         direction = str(params.get("barra_direction", "linear"))
         return _derive_long_short_series(
             arrays,

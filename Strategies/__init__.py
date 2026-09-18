@@ -11,9 +11,11 @@ from .icir import IcirWeightedTopK
 from .multifactor import MultiFactorTopK
 from .small_cap import CANDIDATE_N, HOLD_N, FinRow, SmallCapData, SmallCapStrategy
 from .topk import FactorTopK
+from .chip_vol import ChipVolTrigger
 
 __all__ = [
     "CANDIDATE_N",
+    "ChipVolTrigger",
     "FactorTopK",
     "FinRow",
     "HOLD_N",

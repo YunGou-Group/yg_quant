@@ -210,7 +210,7 @@ watch(runId, load);
           {{ group.dimension }} {{ group.ok }}/{{ group.charts.length }}
         </button>
       </div>
-      <ChartGallery :series="seriesMap" :visible-ids="visibleIds" />
+      <ChartGallery :series="seriesMap" :visible-ids="visibleIds" :horizon="current?.horizon" />
     </template>
   </div>
 </template>

@@ -13,14 +13,14 @@ from ..context import BatchEvalContext, EvalContext
 from ..field_doc import FieldDoc
 from ..metric_result import MetricResult
 from ..param_spec import HORIZON_PARAM, UNIVERSE_PARAM, ParamSpec
-from ..matrix_utils import apply_daily_matrix, assign_quantiles, pearson_pairwise, rank_cols, result_from_daily, spearman_pairwise
+from ..matrix_utils import apply_daily_matrix, assign_quantiles, pearson_pairwise, rank_cols, rank_ic_pairwise, result_from_daily, spearman_pairwise
 
 _MIN = 10
 N_QUANTILES_PARAM = ParamSpec(
     name="n_quantiles",
     type="int",
     label="分层组数",
-    default=5,
+    default=10,
     min=2,
     max=20,
     scope="metric",
@@ -81,7 +81,7 @@ class TailHitRateMetric(BaseMetric):
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
         daily = apply_daily_matrix(self, ctx, params)
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         return result_from_daily(daily, primary=f"tail_hit_rate_top_Q{n_q}", extra_scalars={"horizon": ctx.horizon})
 
 
@@ -163,7 +163,7 @@ class TailSubsampleICMetric(BaseMetric):
             sel = rq == label
             if int(sel.sum()) < _MIN:
                 continue
-            dest[:] = spearman_pairwise(f[sel], r[sel], min_obs=_MIN)
+            dest[:] = rank_ic_pairwise(f[sel], r[sel], min_obs=_MIN)
         return {"tail_subsample_ic_top": ic_top, "tail_subsample_ic_bottom": ic_bot}
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:

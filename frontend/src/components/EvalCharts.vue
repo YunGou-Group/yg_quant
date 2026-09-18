@@ -144,7 +144,7 @@ const kpis = computed(() => {
         </div>
       </section>
     </div>
-    <ChartGallery v-if="data" :series="series" />
+    <ChartGallery v-if="data" :series="series" :horizon="data.horizon" />
   </div>
 </template>
 

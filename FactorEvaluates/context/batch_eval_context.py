@@ -18,8 +18,8 @@ class BatchEvalContext:
     barra: Optional[np.ndarray] = None  # (n_stocks, n_styles)
     size: Optional[np.ndarray] = None  # (n_stocks,) style_size
     date: str = ""
-    n_quantiles: int = 5
-    min_obs: int = 20
+    n_quantiles: int = 10
+    min_obs: int = 10
     intermediates: Dict[str, Any] = field(default_factory=dict)
 
     def masked_factors(self) -> np.ndarray:

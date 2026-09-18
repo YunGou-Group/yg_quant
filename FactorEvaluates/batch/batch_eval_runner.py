@@ -48,8 +48,8 @@ class BatchEvalRunner:
         params = dict(request.get("params") or {})
         params.setdefault("horizon", horizon)
         params.setdefault("universe", universe)
-        params.setdefault("n_quantiles", int(request.get("n_quantiles") or 5))
-        params.setdefault("min_obs", 20)
+        params.setdefault("n_quantiles", int(request.get("n_quantiles") or 10))
+        params.setdefault("min_obs", 10)
         names = list(request.get("factors") or self.factor_loader.list_factors())
         names = [n for n in names if n and not str(n).startswith("style_")]
         if not names:

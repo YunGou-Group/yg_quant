@@ -67,8 +67,10 @@ class LongShortTermConsistencyMetric(BaseMetric):
         slow_window = int(params.get("slow_window", 250))
         if slow_window <= fast_window:
             raise ValueError("slow_window 必须大于 fast_window")
-        fast = daily.rolling(window=fast_window, min_periods=fast_window).mean()
-        slow = daily.rolling(window=slow_window, min_periods=slow_window).mean()
+        fast = daily.rolling(window=fast_window, min_periods=1).mean()
+        slow = daily.rolling(window=slow_window, min_periods=1).mean()
+        fast.iloc[: fast_window - 1] = np.nan
+        slow.iloc[: slow_window - 1] = np.nan
         same = (fast * slow > 0).astype("float64")
         same[(fast.isna()) | (slow.isna())] = float("nan")
         expanding = same.expanding(min_periods=1).mean()

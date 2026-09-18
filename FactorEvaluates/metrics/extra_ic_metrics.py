@@ -16,11 +16,11 @@ from ..metric_result import MetricResult
 from ..param_spec import HORIZON_PARAM, UNIVERSE_PARAM, ParamSpec
 from ..matrix_utils import (
     apply_daily_matrix,
+    auto_direction_signs,
     distance_correlation,
     quantile_bin,
+    rank_ic_pairwise,
     result_from_daily,
-    rolling_nanmean,
-    spearman_pairwise,
     summarize_daily,
 )
 
@@ -28,13 +28,37 @@ MIN_OBS_PARAM = ParamSpec(
     name="min_obs",
     type="int",
     label="每日最少有效股票数",
-    default=20,
+    default=10,
     min=3,
     max=500,
     scope="metric",
 )
 
-DECAY_HORIZONS: Tuple[int, ...] = (1, 2, 3, 4, 5, 10, 20, 60)
+# 与 doc/evaluator CROSSDAY_HORIZONS 一致：同一套日频标签往后挪 lag 天，不是 N 日累计收益。
+DECAY_HORIZONS: Tuple[int, ...] = (1, 2, 3, 4, 5, 10, 20, 40, 60)
+
+
+def shift_return_panel(fwd: pd.DataFrame, lag: int) -> pd.DataFrame:
+    """行 t 换成 t+lag 的收益标签。lag<1 时原样返回。"""
+    n = int(lag)
+    if n < 1:
+        return fwd
+    return fwd.shift(-n)
+
+
+def lag_fwd_stack(main: np.ndarray, lags: Sequence[int]) -> np.ndarray:
+    """(lag, date, stock)：第 t 日放 main[t+lag]；越界为 NaN。"""
+    panel = np.asarray(main)
+    if panel.ndim != 2:
+        raise ValueError(f"收益面板须为 (日期, 股票)，收到 shape={panel.shape}")
+    n_dates, n_stocks = panel.shape
+    keys = tuple(int(n) for n in lags)
+    out = np.full((len(keys), n_dates, n_stocks), np.nan, dtype=np.float32)
+    for i, lag in enumerate(keys):
+        if lag < 1 or lag >= n_dates:
+            continue
+        out[i, : n_dates - lag] = panel[lag:]
+    return out
 
 
 class NonlinearICMetric(BaseMetric):
@@ -53,7 +77,6 @@ class NonlinearICMetric(BaseMetric):
         return (FieldDoc("mean", "预测力", "非线性IC均值", "日度距离相关的平均"),)
 
     def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
-        min_obs = int(params.get("min_obs", batch_ctx.min_obs))
         f = batch_ctx.masked_factors()
         r = batch_ctx.masked_returns()
         p = f.shape[1]
@@ -61,20 +84,29 @@ class NonlinearICMetric(BaseMetric):
         if r is None:
             return {"nonlinear_ic": out}
         valid_r = np.isfinite(r)
-        if int(valid_r.sum()) < min_obs:
+        if int(valid_r.sum()) < 10:
             return {"nonlinear_ic": out}
+        f_sub, r_sub = f[valid_r], r[valid_r]
+        col_valid = np.isfinite(f_sub).sum(axis=0)
+        row_cov = np.isfinite(f_sub).sum(axis=1)
+        good = row_cov >= int(p * 0.80)
+        if int(good.sum()) < 10:
+            return {"nonlinear_ic": out}
+        f_batch = f_sub[good].copy()
+        r_batch = r_sub[good]
+        nans = np.isnan(f_batch)
+        if nans.any():
+            col_means = np.nan_to_num(np.nanmean(f_batch, axis=0), nan=0.0)
+            f_batch[nans] = np.broadcast_to(col_means, f_batch.shape)[nans]
+        n_good = len(r_batch)
         rng = np.random.RandomState(42)
+        if n_good > self._MAX_SAMPLES:
+            idx = rng.choice(n_good, self._MAX_SAMPLES, replace=False)
+            f_batch, r_batch = f_batch[idx], r_batch[idx]
         for j in range(p):
-            sel = valid_r & np.isfinite(f[:, j])
-            n = int(sel.sum())
-            if n < min_obs:
+            if int(col_valid[j]) < 10:
                 continue
-            x = f[sel, j]
-            y = r[sel]
-            if n > self._MAX_SAMPLES:
-                idx = rng.choice(n, self._MAX_SAMPLES, replace=False)
-                x, y = x[idx], y[idx]
-            out[j] = distance_correlation(x, y)
+            out[j] = distance_correlation(f_batch[:, j], r_batch)
         return {"nonlinear_ic": out}
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
@@ -138,7 +170,7 @@ class MutualInfoICMetric(BaseMetric):
 class WeightedICMetric(BaseMetric):
     name = "weighted_ic"
     dimension = "预测力"
-    description = "用 RankIC 250 日滚动均值判方向后，对 Pearson IC 翻转符号"
+    description = "用 RankIC 过去 250 日（不含当天）均值判方向后，对 Pearson IC 翻转符号"
     cost = "derived"
     produces = ()
     requires = ("daily_ic", "daily_rank_ic")
@@ -156,7 +188,10 @@ class WeightedICMetric(BaseMetric):
             raise ValueError("weighted_ic 需要 daily_ic 与 daily_rank_ic")
         ic = pd.Series(ic)
         rank_ic = pd.Series(rank_ic)
-        direction = np.sign(rank_ic.rolling(250, min_periods=20).mean()).replace(0, 1.0)
+        direction = pd.Series(
+            auto_direction_signs(rank_ic.to_numpy(dtype=np.float64), lookback=250, min_periods=20),
+            index=rank_ic.index,
+        )
         aligned = ic * direction
         summary = summarize_daily(aligned)
         return MetricResult(
@@ -171,15 +206,24 @@ class WeightedICMetric(BaseMetric):
         ic = arrays.get("ic")
         if rank is None or ic is None:
             return {}
-        direction = np.sign(rolling_nanmean(rank, 250))
-        direction[direction == 0] = 1.0
+        rank = np.asarray(rank, dtype=np.float64)
+        ic = np.asarray(ic, dtype=np.float64)
+        if rank.ndim == 1:
+            direction = auto_direction_signs(rank, lookback=250, min_periods=20)
+            return {"weighted_ic": ic * direction}
+        direction = np.column_stack(
+            [auto_direction_signs(rank[:, j], lookback=250, min_periods=20) for j in range(rank.shape[1])]
+        )
         return {"weighted_ic": ic * direction}
 
 
 class ICDecayMetric(BaseMetric):
     name = "ic_decay"
     dimension = "有效期"
-    description = "同一因子对未来 1/2/3/4/5/10/20/60 日收益的 RankIC，看预测力衰减"
+    description = (
+        "Corr(Rank(f_t), Rank(r_{t+lag}))，r 与主 IC 同一套收益标签；"
+        "lag=1/2/3/4/5/10/20/40/60 交易日"
+    )
     cost = "panel"
     produces = ()
     requires = ()
@@ -189,26 +233,31 @@ class ICDecayMetric(BaseMetric):
 
     def fields(self) -> Sequence[FieldDoc]:
         return tuple(
-            FieldDoc(f"mean_{n}d", "有效期", f"RankIC {n}d", f"对 {n} 日远期收益的 RankIC 均值")
+            FieldDoc(
+                f"mean_{n}d",
+                "有效期",
+                f"RankIC lag {n}d",
+                f"因子当日与滞后 {n} 个交易日收益标签的 RankIC 均值",
+            )
             for n in DECAY_HORIZONS
         )
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
-        by_h = ctx.intermediates.get("fwd_ret_by_horizon")
-        if not isinstance(by_h, dict) or not by_h:
-            by_h = {int(ctx.horizon): ctx.masked_fwd_ret()}
-        min_obs = int(params.get("min_obs", 20))
+        min_obs = int(params.get("min_obs", 10))
         factor = ctx.masked_factor()
+        fwd = ctx.fwd_ret.reindex(index=factor.index, columns=factor.columns)
+        mask = None
+        if ctx.universe_mask is not None:
+            mask = ctx.universe_mask.reindex(index=factor.index, columns=factor.columns)
         series: Dict[str, pd.Series] = {}
         scalars: Dict[str, Any] = {"horizon": ctx.horizon}
         from ..cross_section_ic_calculator import CrossSectionICCalculator
 
         calc = CrossSectionICCalculator()
         for n in DECAY_HORIZONS:
-            fwd = by_h.get(int(n))
-            if fwd is None:
-                continue
-            aligned = fwd.reindex(index=factor.index, columns=factor.columns)
+            aligned = shift_return_panel(fwd, n)
+            if mask is not None:
+                aligned = aligned.where(mask)
             daily = calc.daily_rank_ic(factor, aligned, min_obs=min_obs)
             series[f"ic_decay_{n}d"] = daily
             summary = summarize_daily(daily)
@@ -233,5 +282,5 @@ class ICDecayMetric(BaseMetric):
         for hi, n in enumerate(horizons):
             if hi >= stacked.shape[0]:
                 continue
-            out[f"ic_decay_{n}d"] = spearman_pairwise(f, stacked[hi], min_obs=min_obs)
+            out[f"ic_decay_{n}d"] = rank_ic_pairwise(f, stacked[hi], min_obs=min_obs)
         return out

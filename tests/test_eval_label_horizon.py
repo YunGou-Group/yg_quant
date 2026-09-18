@@ -44,7 +44,7 @@ def test_fwd_return_clips_bad_ticks():
     assert got == 10.0
 
 
-def test_weighted_pnl_is_cross_section_mean():
+def test_weighted_pnl_is_cross_section_sum():
     from FactorEvaluates.metrics.return_risk_metrics import WeightedPnLMetric
 
     n = 12
@@ -58,15 +58,16 @@ def test_weighted_pnl_is_cross_section_mean():
         min_obs=5,
     )
     out = WeightedPnLMetric().compute_matrix(batch, {})
-    np.testing.assert_allclose(out["weighted_pnl"][0], 0.1)
-    np.testing.assert_allclose(out["weighted_long_pnl"][0], 0.1)
+    np.testing.assert_allclose(out["weighted_pnl"][0], 1.2)
+    np.testing.assert_allclose(out["weighted_long_pnl"][0], 1.2)
 
 
 def test_quantile_spread_requires_all_bins():
     n, p = 40, 2
     factors = np.zeros((n, p), dtype=np.float64)
     factors[:, 0] = np.linspace(-2, 2, n)
-    factors[:, 1] = np.r_[np.zeros(35), np.ones(5)]
+    factors[:, 1] = np.nan
+    factors[:4, 1] = np.array([1.0, 2.0, 3.0, 4.0])
     returns = np.linspace(-0.1, 0.1, n)
     labels = assign_quantiles(factors, 5)
     batch = BatchEvalContext(

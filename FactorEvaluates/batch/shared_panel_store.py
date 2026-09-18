@@ -47,8 +47,9 @@ class SharedPanelStore:
         # 不额外 copy：ReturnCalculator 内部会 copy，避免峰值翻倍。
         full_open.index = pd.to_datetime(full_open.index).strftime("%Y-%m-%d")
         self._say("phase", "fwd_ret", 0.08, "计算远期收益")
-        wanted = {int(horizon), *[int(n) for n in decay_horizons]}
-        # LRU=1：算完一个 horizon 立刻转 float32 切片，避免 8 张全历史 float64 面板叠在内存里
+        # ic_decay 对主 horizon 标签做 lag，不再另算 N 日累计收益
+        _ = decay_horizons
+        wanted = {int(horizon)}
         calc = ReturnCalculator(full_open, lru_size=1)
         eval_open = full_open
         if start:

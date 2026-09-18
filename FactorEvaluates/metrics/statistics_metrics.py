@@ -20,11 +20,11 @@ from ..matrix_utils import (
     nan_skew,
     pearson_cols,
     pearson_pairwise,
-    rank_cols,
+    rank_cols_ordinal,
     result_from_daily,
 )
 
-AUTOCORR_LAGS: Tuple[int, ...] = (1, 2, 3, 5, 10, 20, 60)
+AUTOCORR_LAGS: Tuple[int, ...] = (1, 2, 3, 4, 5, 10, 20, 40, 60)
 
 
 class FactorStatisticsMetric(BaseMetric):
@@ -137,7 +137,7 @@ class FactorAutocorrMetric(BaseMetric):
         ring = batch_ctx.intermediates.get("rank_ring")
         if ranks is None or ring is None:
             return out
-        min_obs = int(params.get("min_obs", batch_ctx.min_obs or 20))
+        min_obs = int(params.get("min_obs", batch_ctx.min_obs or 10))
         for lag in AUTOCORR_LAGS:
             if lag > int(ring.shape[0]):
                 continue
@@ -148,7 +148,7 @@ class FactorAutocorrMetric(BaseMetric):
         factor = ctx.masked_factor()
         values = factor.to_numpy(dtype=np.float64, copy=False)
         # rank_cols 按列排名；日截面秩 = 对 (股票 × 日) 转置后再转回
-        ranks = rank_cols(values.T).T
+        ranks = rank_cols_ordinal(values.T).T
         series: Dict[str, pd.Series] = {}
         scalars: Dict[str, Any] = {"horizon": ctx.horizon}
         for lag in AUTOCORR_LAGS:
@@ -156,7 +156,7 @@ class FactorAutocorrMetric(BaseMetric):
                 continue
             daily = np.full(ranks.shape[0], np.nan)
             for i in range(lag, ranks.shape[0]):
-                daily[i] = pearson_pairwise(ranks[i, :, None], ranks[i - lag], min_obs=20)[0]
+                daily[i] = pearson_pairwise(ranks[i, :, None], ranks[i - lag], min_obs=10)[0]
             s = pd.Series(daily, index=factor.index, name=f"factor_autocorr_{lag}d")
             series[s.name] = s
             clean = s.dropna()

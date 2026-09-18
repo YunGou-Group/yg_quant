@@ -20,7 +20,7 @@ N_QUANTILES_PARAM = ParamSpec(
     name="n_quantiles",
     type="int",
     label="分层组数",
-    default=5,
+    default=10,
     min=2,
     max=20,
     scope="metric",
@@ -30,7 +30,7 @@ MIN_PER_BIN_PARAM = ParamSpec(
     name="min_stock_per_bin",
     type="int",
     label="每组最少股票数",
-    default=5,
+    default=10,
     min=1,
     max=200,
     scope="metric",
@@ -86,7 +86,7 @@ class QuantileMetric(BaseMetric):
 
     def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
         n_q = int(params.get("n_quantiles", batch_ctx.n_quantiles))
-        min_per = int(params.get("min_stock_per_bin", 5))
+        min_per = int(params.get("min_stock_per_bin", 10))
         f = batch_ctx.masked_factors()
         r = batch_ctx.masked_returns()
         p = f.shape[1]
@@ -109,8 +109,8 @@ class QuantileMetric(BaseMetric):
         return out
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
-        n_quantiles = int(params.get("n_quantiles", 5))
-        min_per_bin = int(params.get("min_stock_per_bin", 5))
+        n_quantiles = int(params.get("n_quantiles", 10))
+        min_per_bin = int(params.get("min_stock_per_bin", 10))
         horizon = int(ctx.horizon)
         factor = ctx.masked_factor()
         fwd = ctx.masked_fwd_ret()
@@ -123,18 +123,20 @@ class QuantileMetric(BaseMetric):
         for date in factor.index:
             row_f = factor.loc[date]
             row_r = fwd.loc[date]
-            valid = row_f.notna() & row_r.notna()
+            f_row = row_f.to_numpy(dtype=np.float64)
+            r_row = row_r.to_numpy(dtype=np.float64)
+            finite_f = np.isfinite(f_row)
             labels_s = pd.Series(np.nan, index=factor.columns)
-            if int(valid.sum()) >= n_quantiles * min_per_bin:
-                f_valid = row_f[valid].to_numpy(dtype=np.float64)
-                labels = assign_quantiles(f_valid, n_quantiles)
-                labels_s.loc[row_f.index[valid]] = labels.astype(float)
-                r_valid = row_r[valid].to_numpy(dtype=np.float64)
+            if int(finite_f.sum()) >= n_quantiles:
+                labels = assign_quantiles(f_row[finite_f], n_quantiles)
+                labels_s.iloc[np.flatnonzero(finite_f)] = labels.astype(float)
+                lab_full = np.zeros(f_row.shape[0], dtype=np.int32)
+                lab_full[finite_f] = labels
                 for qi in range(1, n_quantiles + 1):
-                    sel = labels == qi
+                    sel = (lab_full == qi) & np.isfinite(r_row)
                     if int(sel.sum()) < min_per_bin:
                         continue
-                    daily.loc[date, f"Q{qi}"] = float(np.mean(r_valid[sel]))
+                    daily.loc[date, f"Q{qi}"] = float(np.mean(r_row[sel]))
             label_rows.append(labels_s)
         ctx.intermediates["quantile_labels"] = pd.DataFrame(label_rows, index=factor.index)
 
@@ -234,7 +236,7 @@ class QuantileICMetric(BaseMetric):
         from ..matrix_utils import apply_daily_matrix, result_from_daily
 
         daily = apply_daily_matrix(self, ctx, params)
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         return result_from_daily(daily, primary=f"quantile_ic_Q{n_q}", extra_scalars={"horizon": ctx.horizon})
 
 
@@ -276,7 +278,7 @@ class QuantileRankICMetric(BaseMetric):
         from ..matrix_utils import apply_daily_matrix, result_from_daily
 
         daily = apply_daily_matrix(self, ctx, params)
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         return result_from_daily(daily, primary=f"quantile_rank_ic_Q{n_q}", extra_scalars={"horizon": ctx.horizon})
 
 
@@ -306,16 +308,17 @@ class QuantileHitMetric(BaseMetric):
         if r is None:
             return out
         fq = _ensure_labels(batch_ctx, n_q)
+        r_valid = np.isfinite(r)
         rq = assign_quantiles(r[:, None], n_q)[:, 0]
-        top_r = rq == n_q
-        bot_r = rq == 1
+        top_r = r_valid & (rq == n_q)
+        bot_r = r_valid & (rq == 1)
         for qi in range(1, n_q + 1):
             in_q = fq == qi
-            cnt = in_q.sum(axis=0)
-            top = (in_q & top_r[:, None]).sum(axis=0)
-            bot = (in_q & bot_r[:, None]).sum(axis=0)
-            out[f"quantile_top_hit_Q{qi}"] = np.where(cnt > 0, top / np.maximum(cnt, 1), np.nan)
-            out[f"quantile_bot_hit_Q{qi}"] = np.where(cnt > 0, bot / np.maximum(cnt, 1), np.nan)
+            cnt = (in_q & r_valid[:, None]).sum(axis=0).astype(np.float64)
+            top = (in_q & top_r[:, None]).sum(axis=0).astype(np.float64)
+            bot = (in_q & bot_r[:, None]).sum(axis=0).astype(np.float64)
+            out[f"quantile_top_hit_Q{qi}"] = np.where(cnt >= 10, top / np.maximum(cnt, 1), np.nan)
+            out[f"quantile_bot_hit_Q{qi}"] = np.where(cnt >= 10, bot / np.maximum(cnt, 1), np.nan)
         out["best_in_best_ratio"] = out[f"quantile_top_hit_Q{n_q}"]
         out["worst_in_best_ratio"] = out[f"quantile_bot_hit_Q{n_q}"]
         return out
@@ -324,7 +327,7 @@ class QuantileHitMetric(BaseMetric):
         from ..matrix_utils import apply_daily_matrix, result_from_daily
 
         daily = apply_daily_matrix(self, ctx, params)
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         return result_from_daily(daily, primary=f"quantile_top_hit_Q{n_q}", extra_scalars={"horizon": ctx.horizon})
 
 
@@ -346,7 +349,7 @@ class QuantileTurnoverMetric(BaseMetric):
         labels = ctx.intermediates.get("quantile_labels")
         if not isinstance(labels, pd.DataFrame):
             raise ValueError("quantile_turnover 需要中间量 quantile_labels，请先运行 quantile")
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         series: Dict[str, pd.Series] = {}
         for qi in range(1, n_q + 1):
             prev = None
@@ -356,7 +359,7 @@ class QuantileTurnoverMetric(BaseMetric):
                 if prev is None:
                     values.append(np.nan)
                 else:
-                    total = len(members | prev)
+                    total = len(members)
                     overlap = len(members & prev)
                     values.append(1.0 - overlap / total if total else np.nan)
                 prev = members
@@ -376,7 +379,7 @@ class QuantileTurnoverMetric(BaseMetric):
     def compute_from_labels(
         self, labels: np.ndarray, params: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         n_dates, _, n_f = labels.shape
         out = {
             f"quantile_turnover_Q{q}": np.full((n_dates, n_f), np.nan, dtype=np.float32)
@@ -389,10 +392,10 @@ class QuantileTurnoverMetric(BaseMetric):
                 pm = prev == q
                 cm = cur == q
                 inter = np.sum(pm & cm, axis=0)
-                union = np.sum(pm | cm, axis=0)
+                total = np.sum(cm, axis=0)
                 with np.errstate(invalid="ignore", divide="ignore"):
                     out[f"quantile_turnover_Q{q}"][t] = np.where(
-                        union > 0, 1.0 - inter / union, np.nan
+                        total > 0, 1.0 - inter / total, np.nan
                     )
         return out
 
@@ -428,7 +431,7 @@ class QuantileFactorMeanMetric(BaseMetric):
         from ..matrix_utils import apply_daily_matrix, result_from_daily
 
         daily = apply_daily_matrix(self, ctx, params)
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         return result_from_daily(
             daily, primary=f"quantile_factor_mean_Q{n_q}", extra_scalars={"horizon": ctx.horizon}
         )
@@ -508,8 +511,8 @@ class QuantileReturnsAfterCostMetric(BaseMetric):
         labels = ctx.intermediates.get("quantile_labels")
         if not isinstance(labels, pd.DataFrame):
             raise ValueError("quantile_returns_after_cost 需要 quantile_labels，请先运行 quantile")
-        n_q = int(params.get("n_quantiles", 5))
-        min_per = int(params.get("min_stock_per_bin", 5))
+        n_q = int(params.get("n_quantiles", 10))
+        min_per = int(params.get("min_stock_per_bin", 10))
         cost_bps = float(params.get("transaction_cost_bps", DEFAULT_ROUND_TRIP_BPS))
         buy_rate = float(params.get("transaction_buy_rate", DEFAULT_BUY_RATE))
         sell_rate = float(params.get("transaction_sell_rate", DEFAULT_SELL_RATE))
@@ -570,7 +573,7 @@ class QuantileReturnsAfterCostMetric(BaseMetric):
     def compute_crossday(
         self, arrays: Mapping[str, Any], params: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        n_q = int(params.get("n_quantiles", 5))
+        n_q = int(params.get("n_quantiles", 10))
         cost_bps = float(params.get("transaction_cost_bps", DEFAULT_ROUND_TRIP_BPS))
         buy_rate = float(params.get("transaction_buy_rate", DEFAULT_BUY_RATE))
         sell_rate = float(params.get("transaction_sell_rate", DEFAULT_SELL_RATE))

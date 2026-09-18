@@ -1,19 +1,40 @@
 <script setup>
 import { computed } from "vue";
 import ChartPanel from "./ChartPanel.vue";
-import { matchSeries, prefixSeries } from "./seriesUtils.js";
+import {
+  cumNavFromReturns,
+  lineTrace,
+  matchSeries,
+  prefixQuantileTraces,
+  shortQuantileName,
+  sortQuantileKeys,
+} from "./seriesUtils.js";
 
-const props = defineProps({ series: { type: Object, default: () => ({}) } });
-
-const returns = computed(() => {
-  const nav = matchSeries(props.series, (key) => /^Q\d+$/.test(key));
-  if (nav.length) return nav;
-  return prefixSeries(props.series, "quantile_returns_Q");
+const props = defineProps({
+  series: { type: Object, default: () => ({}) },
+  horizon: { type: [Number, String], default: 1 },
 });
 
-const afterCost = computed(() => prefixSeries(props.series, "quantile_returns_after_cost_"));
+const returns = computed(() => {
+  const fromDaily = prefixQuantileTraces(props.series, "quantile_returns_Q", {
+    toItem: (item) => cumNavFromReturns(item, props.horizon),
+  });
+  if (fromDaily.length) return fromDaily;
+  const navKeys = sortQuantileKeys(
+    Object.keys(props.series || {}).filter((key) => /^Q\d+$/.test(key))
+  );
+  return navKeys
+    .map((key) => lineTrace(props.series[key], shortQuantileName(key)))
+    .filter(Boolean);
+});
 
-const factorMean = computed(() => prefixSeries(props.series, "quantile_factor_mean_"));
+const afterCost = computed(() =>
+  prefixQuantileTraces(props.series, "quantile_returns_after_cost_", {
+    toItem: (item) => cumNavFromReturns(item, props.horizon),
+  })
+);
+
+const factorMean = computed(() => prefixQuantileTraces(props.series, "quantile_factor_mean_"));
 
 const extra = computed(() => {
   const rename = (key) =>
@@ -29,10 +50,10 @@ const extra = computed(() => {
       .replace(/^quantile_top_hit_/, "顶收益命中 ")
       .replace(/^quantile_bot_hit_/, "底收益命中 ");
   const fromPrefix = [
-    ...prefixSeries(props.series, "quantile_ic_Q", { rename }),
-    ...prefixSeries(props.series, "quantile_rank_ic_Q", { rename }),
-    ...prefixSeries(props.series, "quantile_top_hit_Q", { rename }),
-    ...prefixSeries(props.series, "quantile_bot_hit_Q", { rename }),
+    ...prefixQuantileTraces(props.series, "quantile_ic_Q", { rename }),
+    ...prefixQuantileTraces(props.series, "quantile_rank_ic_Q", { rename }),
+    ...prefixQuantileTraces(props.series, "quantile_top_hit_Q", { rename }),
+    ...prefixQuantileTraces(props.series, "quantile_bot_hit_Q", { rename }),
   ];
   if (fromPrefix.length) return fromPrefix;
   return matchSeries(
@@ -46,7 +67,7 @@ const extra = computed(() => {
 <template>
   <div class="stack">
     <ChartPanel title="分位净值" :traces="returns" />
-    <ChartPanel v-if="afterCost.length" title="分位费后收益" :traces="afterCost" />
+    <ChartPanel v-if="afterCost.length" title="分位费后净值" :traces="afterCost" />
     <ChartPanel v-if="factorMean.length" title="分位因子均值" :traces="factorMean" />
     <ChartPanel title="分位 IC / 命中" :traces="extra" />
   </div>

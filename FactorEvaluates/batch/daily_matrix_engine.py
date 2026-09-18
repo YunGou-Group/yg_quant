@@ -32,8 +32,8 @@ class DailyMatrixEngine:
         self.label_metrics = [m for m in (label_metrics or []) if m.has_label_history()]
         self.params = dict(params)
         self.need_daily_corr = bool(need_daily_corr)
-        self.n_quantiles = int(self.params.get("n_quantiles", 5))
-        self.min_obs = int(self.params.get("min_obs", 20))
+        self.n_quantiles = int(self.params.get("n_quantiles", 10))
+        self.min_obs = int(self.params.get("min_obs", 10))
         self._panel_pack: Optional[ShmPack] = None
         self._style = self._style_stack()
         self._fwd_decay, self._decay_h = self._decay_stack()
@@ -255,8 +255,6 @@ class DailyMatrixEngine:
         if self._fwd_decay is not None:
             pack.add("fwd_decay", ShmArray.create(self._fwd_decay))
             self._fwd_decay = pack.items["fwd_decay"].array
-            for i, n in enumerate(self._decay_h):
-                keep_fwd[int(n)] = self._fwd_decay[i]
         self.store.fwd = keep_fwd
         if self._style is not None:
             pack.add("style", ShmArray.create(self._style))
@@ -312,17 +310,18 @@ class DailyMatrixEngine:
         return stack
 
     def _decay_stack(self) -> Tuple[Optional[np.ndarray], Tuple[int, ...]]:
+        from ..metrics.extra_ic_metrics import lag_fwd_stack
+
+        h = int(self.store.horizon)
+        if h in self.store.fwd:
+            self.store.fwd = {h: self.store.fwd[h]}
         if not any(m.get_name() == "ic_decay" for m in self.metrics):
-            # 只要主 horizon，丢掉其余远期面板
-            h = int(self.store.horizon)
-            if h in self.store.fwd:
-                self.store.fwd = {h: self.store.fwd[h]}
             return None, ()
-        hs = tuple(int(n) for n in DECAY_HORIZONS if int(n) in self.store.fwd)
-        if not hs:
+        main = self.store.fwd.get(h)
+        if main is None:
             return None, ()
-        stacked = np.stack([self.store.fwd[n] for n in hs], axis=0)
-        return stacked, hs
+        lags = tuple(int(n) for n in DECAY_HORIZONS)
+        return lag_fwd_stack(main, lags), lags
 
     def _size_col(self) -> int:
         try:

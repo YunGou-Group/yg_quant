@@ -15,7 +15,7 @@ from ..context import EvalContext
 from ..field_doc import FieldDoc
 from ..metric_result import MetricResult
 from ..param_spec import HORIZON_PARAM, ParamSpec
-from ..matrix_utils import expanding_icir, icir_row
+from ..matrix_utils import expanding_icir
 
 
 class ICIRMetric(BaseMetric):
@@ -45,6 +45,7 @@ class ICIRMetric(BaseMetric):
         if not isinstance(daily, pd.Series):
             daily = pd.Series(daily)
         summary = CrossSectionICCalculator().summary(daily)
+        expanding = expanding_icir(daily.to_numpy(dtype=np.float64)[:, None])[:, 0]
         return MetricResult(
             scalars={
                 "icir": summary["icir"],
@@ -52,7 +53,8 @@ class ICIRMetric(BaseMetric):
                 "ic_std": summary["std"],
                 "n_days": summary["n_days"],
                 "horizon": ctx.horizon,
-            }
+            },
+            series={"icir": pd.Series(expanding, index=daily.index, dtype="float64")},
         )
 
     def compute_crossday(
@@ -61,7 +63,7 @@ class ICIRMetric(BaseMetric):
         rank = arrays.get("rank_ic")
         if rank is None:
             return {}
-        return {"icir": icir_row(rank)}
+        return {"icir": expanding_icir(np.asarray(rank, dtype=np.float64)).astype(np.float32)}
 
 
 class PearsonICIRMetric(BaseMetric):
@@ -91,6 +93,7 @@ class PearsonICIRMetric(BaseMetric):
         if not isinstance(daily, pd.Series):
             daily = pd.Series(daily)
         summary = CrossSectionICCalculator().summary(daily)
+        expanding = expanding_icir(daily.to_numpy(dtype=np.float64)[:, None])[:, 0]
         return MetricResult(
             scalars={
                 "icir": summary["icir"],
@@ -98,7 +101,8 @@ class PearsonICIRMetric(BaseMetric):
                 "ic_std": summary["std"],
                 "n_days": summary["n_days"],
                 "horizon": ctx.horizon,
-            }
+            },
+            series={"ic_ir": pd.Series(expanding, index=daily.index, dtype="float64")},
         )
 
     def compute_crossday(
@@ -107,7 +111,7 @@ class PearsonICIRMetric(BaseMetric):
         ic = arrays.get("ic")
         if ic is None:
             return {}
-        return {"ic_ir": icir_row(ic)}
+        return {"ic_ir": expanding_icir(np.asarray(ic, dtype=np.float64)).astype(np.float32)}
 
 
 class NonlinearICIRMetric(BaseMetric):
@@ -156,3 +160,50 @@ class NonlinearICIRMetric(BaseMetric):
         if src is None:
             return {}
         return {"nonlinear_ic_ir": expanding_icir(np.asarray(src, dtype=np.float64)).astype(np.float32)}
+
+
+class RankICIRMetric(BaseMetric):
+    name = "rank_ic_ir"
+    dimension = "预测力"
+    description = "RankIC 的 expanding 信息比率 mean(IC_1..t)/std"
+    cost = "derived"
+    produces = ()
+    requires = ("daily_rank_ic",)
+
+    def params(self) -> Sequence[ParamSpec]:
+        return (HORIZON_PARAM,)
+
+    def fields(self) -> Sequence[FieldDoc]:
+        return (
+            FieldDoc("icir", "预测力", "RankIC IR", "expanding mean(RankIC)/std 的样本末值"),
+            FieldDoc("n_days", "样本", "有效天数", "RankIC 非空的交易日数"),
+            FieldDoc("horizon", "参数", "持有期 N", "远期收益的持有交易日数"),
+        )
+
+    def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
+        daily = ctx.intermediates.get("daily_rank_ic")
+        if daily is None:
+            raise ValueError("rank_ic_ir 需要中间量 daily_rank_ic，请先运行 rank_ic")
+        if not isinstance(daily, pd.Series):
+            daily = pd.Series(daily)
+        expanding = expanding_icir(daily.to_numpy(dtype=np.float64)[:, None])[:, 0]
+        series = pd.Series(expanding, index=daily.index, name="rank_ic_ir", dtype="float64")
+        summary = CrossSectionICCalculator().summary(daily)
+        return MetricResult(
+            scalars={
+                "icir": summary["icir"],
+                "ic_mean": summary["mean"],
+                "ic_std": summary["std"],
+                "n_days": summary["n_days"],
+                "horizon": ctx.horizon,
+            },
+            series={"rank_ic_ir": series},
+        )
+
+    def compute_crossday(
+        self, arrays: Mapping[str, Any], params: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        rank = arrays.get("rank_ic")
+        if rank is None:
+            return {}
+        return {"rank_ic_ir": expanding_icir(np.asarray(rank, dtype=np.float64)).astype(np.float32)}

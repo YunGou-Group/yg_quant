@@ -7,29 +7,29 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .matrix_utils import rank_ic_pairwise
+
 
 class CrossSectionICCalculator:
     def daily_rank_ic(
         self,
         factor: pd.DataFrame,
         fwd_ret: pd.DataFrame,
-        min_obs: int = 20,
+        min_obs: int = 10,
     ) -> pd.Series:
         x = factor.to_numpy(dtype=np.float64, copy=False)
         y = fwd_ret.to_numpy(dtype=np.float64, copy=False)
-        # 先取交集再排名，与 matrix_utils.spearman_pairwise 保持同一口径：
-        # 各自在全集上排名会让缺失样本挤占名次，系统性压低 |IC|。
-        valid = np.isfinite(x) & np.isfinite(y)
-        x = np.where(valid, x, np.nan)
-        y = np.where(valid, y, np.nan)
-        ic = self._pearson_rows(self._rank_rows(x), self._rank_rows(y), min_obs=min_obs)
+        ic = np.array(
+            [rank_ic_pairwise(x[i], y[i], min_obs=min_obs)[0] for i in range(x.shape[0])],
+            dtype=np.float64,
+        )
         return pd.Series(ic, index=factor.index, name="daily_rank_ic")
 
     def daily_pearson_ic(
         self,
         factor: pd.DataFrame,
         fwd_ret: pd.DataFrame,
-        min_obs: int = 20,
+        min_obs: int = 10,
     ) -> pd.Series:
         x = factor.to_numpy(dtype=np.float64, copy=False)
         y = fwd_ret.to_numpy(dtype=np.float64, copy=False)
@@ -62,33 +62,8 @@ class CrossSectionICCalculator:
         }
 
     @staticmethod
-    def _rank_rows(values: np.ndarray) -> np.ndarray:
-        out = np.full(values.shape, np.nan, dtype=np.float64)
-        for i in range(values.shape[0]):
-            row = values[i]
-            valid = np.isfinite(row)
-            n = int(valid.sum())
-            if n < 3:
-                continue
-            vals = row[valid]
-            order = np.argsort(vals, kind="mergesort")
-            ranks = np.empty(n, dtype=np.float64)
-            ranks[order] = np.arange(1, n + 1, dtype=np.float64)
-            sorted_vals = vals[order]
-            j = 0
-            while j < n:
-                k = j + 1
-                while k < n and sorted_vals[k] == sorted_vals[j]:
-                    k += 1
-                if k - j > 1:
-                    ranks[order[j:k]] = 0.5 * ((j + 1) + k)
-                j = k
-            out[i, valid] = ranks
-        return out
-
-    @staticmethod
     def _pearson_rows(
-        left: np.ndarray, right: np.ndarray, min_obs: int = 20
+        left: np.ndarray, right: np.ndarray, min_obs: int = 10
     ) -> np.ndarray:
         valid = np.isfinite(left) & np.isfinite(right)
         count = valid.sum(axis=1)

@@ -19,6 +19,7 @@ import TurnoverChart from "./TurnoverChart.vue";
 const props = defineProps({
   series: { type: Object, default: () => ({}) },
   visibleIds: { type: Object, default: null },
+  horizon: { type: [Number, String], default: 1 },
 });
 
 function show(id) {
@@ -36,7 +37,7 @@ function showAny(ids) {
     <IcSeriesChart v-if="show('ic_series')" :series="series" />
     <DistributionChart v-if="show('ic_hist')" :series="series" />
     <IcDecayChart v-if="show('ic_decay')" :series="series" />
-    <QuantileReturnsChart v-if="show('quantile_returns')" :series="series" />
+    <QuantileReturnsChart v-if="show('quantile_returns')" :series="series" :horizon="horizon" />
     <TurnoverChart v-if="show('turnover')" :series="series" />
     <MonotonicityChart v-if="show('monotonicity')" :series="series" />
     <ConsistencyChart v-if="show('consistency')" :series="series" />

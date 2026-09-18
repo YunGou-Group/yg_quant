@@ -33,6 +33,65 @@ export function prefixSeries(series, prefix, extra = {}) {
     .filter(Boolean);
 }
 
+export function quantileNum(key) {
+  const match = String(key || "").match(/Q(\d+)$/i);
+  return match ? Number(match[1]) : Infinity;
+}
+
+export function shortQuantileName(key) {
+  const n = quantileNum(key);
+  return Number.isFinite(n) && n !== Infinity ? `Q${n}` : key;
+}
+
+export function sortQuantileKeys(keys) {
+  return [...keys].sort((a, b) => {
+    const na = quantileNum(a);
+    const nb = quantileNum(b);
+    if (na !== nb) return na - nb;
+    return String(a).localeCompare(String(b));
+  });
+}
+
+export function toOneDayReturn(value, horizon = 1) {
+  const n = Math.max(1, Number(horizon) || 1);
+  if (value == null || value === "") return NaN;
+  const x = Number(value);
+  if (!Number.isFinite(x)) return NaN;
+  const clipped = Math.min(Math.max(x, -0.999), 10);
+  if (n === 1) return clipped;
+  return (1 + clipped) ** (1 / n) - 1;
+}
+
+/** N 日收益转与分位净值同口径的累计净值；缺失日保持上一净值。 */
+export function cumNavFromReturns(item, horizon = 1) {
+  const xy = asXY(item);
+  let nav = 1;
+  let started = false;
+  const values = [];
+  for (const raw of xy.y) {
+    const oneDay = toOneDayReturn(raw, horizon);
+    if (!Number.isFinite(oneDay)) {
+      values.push(started ? nav : null);
+      continue;
+    }
+    nav *= 1 + oneDay;
+    started = true;
+    values.push(nav);
+  }
+  return { dates: xy.x, values };
+}
+
+export function prefixQuantileTraces(series, prefix, extra = {}) {
+  const keys = Object.keys(series || {}).filter((key) => key.startsWith(prefix));
+  return sortQuantileKeys(keys)
+    .map((key) => {
+      const item = extra.toItem ? extra.toItem(series[key], key) : series[key];
+      const name = extra.rename ? extra.rename(key) : shortQuantileName(key);
+      return lineTrace(item, name, extra.trace || {});
+    })
+    .filter(Boolean);
+}
+
 export function matchSeries(series, pred, extra = {}) {
   return Object.keys(series || {})
     .filter(pred)
