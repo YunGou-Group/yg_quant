@@ -47,13 +47,19 @@ class Engine:
         *,
         executor: Optional[Broker] = None,
         initial_cash: float = 1_000_000.0,
-        commission: float = 0.0003,
+        commission: float = 0.0001,
         stamp: float = 0.0005,
         lot_size: int = 100,
+        slippage: float = 0.00258,
+        min_commission: float = 5.0,
     ):
         self.panel = panel
         self.executor = executor or OpenFillExecutor(
-            commission=commission, stamp=stamp, lot_size=lot_size
+            commission=commission,
+            stamp=stamp,
+            lot_size=lot_size,
+            slippage=slippage,
+            min_commission=min_commission,
         )
         self.initial_cash = float(initial_cash)
 
@@ -106,9 +112,13 @@ class Engine:
                 )
                 idx = np.flatnonzero(gone)
                 proceeds = float((shares[gone] * last_px[gone]).sum())
-                abs_n = abs(proceeds)
-                fee = abs_n * float(getattr(self.executor, "commission", 0.0) or 0.0)
-                fee += abs_n * float(getattr(self.executor, "stamp", 0.0) or 0.0)
+                fee_fn = getattr(self.executor, "order_fee", None)
+                if callable(fee_fn):
+                    fee = float(np.sum(fee_fn(np.abs(shares[gone] * last_px[gone]), sell=True)))
+                else:
+                    abs_n = abs(proceeds)
+                    fee = abs_n * float(getattr(self.executor, "commission", 0.0) or 0.0)
+                    fee += abs_n * float(getattr(self.executor, "stamp", 0.0) or 0.0)
                 forced_fills.append(
                     FillReport(
                         date=self.panel.dates[t],

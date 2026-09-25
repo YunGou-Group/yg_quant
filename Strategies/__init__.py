@@ -7,20 +7,28 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from .equal import EqualWeightTopK
 from .icir import IcirWeightedTopK
-from .multifactor import MultiFactorTopK
+from .lgbm import LgbmWeightedTopK
 from .small_cap import CANDIDATE_N, HOLD_N, FinRow, SmallCapData, SmallCapStrategy
 from .topk import FactorTopK
-from .chip_vol import ChipVolTrigger
+from .wufu import WufuEtf
+from .wufu_a088 import WufuAlpha088
+from .wufu_mix import WufuMix
+from .wufu_ns import WufuXinChun
 
 __all__ = [
     "CANDIDATE_N",
-    "ChipVolTrigger",
+    "EqualWeightTopK",
     "FactorTopK",
     "FinRow",
     "HOLD_N",
     "IcirWeightedTopK",
-    "MultiFactorTopK",
+    "LgbmWeightedTopK",
     "SmallCapData",
     "SmallCapStrategy",
+    "WufuAlpha088",
+    "WufuEtf",
+    "WufuMix",
+    "WufuXinChun",
 ]

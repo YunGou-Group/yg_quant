@@ -17,7 +17,7 @@ from FactorEvaluates.industry_panel import load_l1_code_panel
 from FactorEvaluates.market_panel_loader import HS300_SYMBOL, MarketPanelLoader
 from yg_quant_repo import default_db_path
 from StrategyEngine.live.codes import to_qmt_code
-from StrategyEngine.run import _SAFE_STEM, _runs_root
+from StrategyEngine.run import _SAFE_STEM, _snapshot_path
 
 from . import ledger
 from .engine import run_attribution
@@ -344,11 +344,10 @@ def resolve_snapshot(run: str) -> Path:
     name = text[:-5] if text.lower().endswith(".json") else text
     if not _SAFE_STEM.fullmatch(name):
         raise FileNotFoundError(name)
-    root = _runs_root().resolve()
-    dest = (root / f"{name}.json").resolve()
-    if dest.parent != root or not dest.is_file():
-        raise FileNotFoundError(f"找不到回测快照 {name}")
-    return dest
+    try:
+        return _snapshot_path(name)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"找不到回测快照 {name}") from None
 
 
 def _run_files(snapshot: Mapping[str, Any], snap_path: Path) -> tuple[Path, Path]:

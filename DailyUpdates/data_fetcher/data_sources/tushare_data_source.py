@@ -11,6 +11,11 @@ import os
 import time
 from tqdm import tqdm
 from DailyUpdates.data_fetcher.data_source_base import DataSourceBase, FetchSlice
+from DailyUpdates.storage.etf_schema import (
+    ETF_EXTRA_TS_CODES,
+    ETF_TUSHARE_BASIC_FIELDS,
+    ETF_TUSHARE_DAILY_FIELDS,
+)
 from DailyUpdates.storage.financial_schema import FINANCIAL_TUSHARE_FIELDS
 
 # index_weight 请求代码与配置代码可以不同，写入仍用配置里的代码。
@@ -87,31 +92,13 @@ class TushareDataSource(DataSourceBase):
                 raise ValueError(f"指数数据配置缺少 index_list 字段")
             
             if api_name == 'index_daily':
-                # 获取所有指定指数的数据
-                all_data = []
-                for index_code in index_list:
-                    paras = {'ts_code': index_code, 'start_date': start_date, 'end_date': end_date}
-                    index_data = self.getTushareInfo(self.pro.index_daily, paras, fields)
-                    if not index_data.empty:
-                        all_data.append(index_data)
-                
-                if all_data:
-                    return pd.concat(all_data, ignore_index=True)
-                else:
-                    return pd.DataFrame()
+                return self._fetch_index_daily_range(
+                    self.pro.index_daily, index_list, fields, start_date, end_date
+                )
             elif api_name == 'index_dailybasic':
-                # 获取所有指定指数的数据
-                all_data = []
-                for index_code in index_list:
-                    paras = {'ts_code': index_code, 'start_date': start_date, 'end_date': end_date}
-                    index_data = self.getTushareInfo(self.pro.index_dailybasic, paras, fields)
-                    if not index_data.empty:
-                        all_data.append(index_data)
-                
-                if all_data:
-                    return pd.concat(all_data, ignore_index=True)
-                else:
-                    return pd.DataFrame()
+                return self._fetch_index_daily_range(
+                    self.pro.index_dailybasic, index_list, fields, start_date, end_date
+                )
             else:
                 raise ValueError(f"不支持的指数API接口: {api_name}")
 
@@ -138,9 +125,39 @@ class TushareDataSource(DataSourceBase):
             if api_name == 'index_weight':
                 return self._fetch_index_weight(config, fields, start_date, end_date)
             raise ValueError(f"不支持的指数成分API接口: {api_name}")
+
+        elif data_type == 'etf':
+            if api_name == 'fund_daily':
+                return self._fetch_fund_daily(config, fields, start_date, end_date)
+            raise ValueError(f"不支持的ETF API接口: {api_name}")
+
+        elif data_type == 'etf_info':
+            if api_name == 'fund_basic':
+                return self._fetch_fund_basic(config, fields)
+            raise ValueError(f"不支持的ETF信息API接口: {api_name}")
         
         else:
             raise ValueError(f"不支持的数据类型: {data_type}")
+
+    def fetch_trade_calendar(self, config: Dict, start_date: str, end_date: str) -> pd.DataFrame:
+        token = config.get("token")
+        if not token:
+            raise ValueError("Tushare 配置中缺少 token，无法拉取交易日历")
+        ts.set_token(token)
+        pro = ts.pro_api()
+        digits_s = "".join(ch for ch in str(start_date) if ch.isdigit())[:8]
+        digits_e = "".join(ch for ch in str(end_date) if ch.isdigit())[:8]
+        frame = pro.trade_cal(
+            exchange="SSE",
+            start_date=digits_s,
+            end_date=digits_e,
+            is_open="1",
+        )
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=["trade_date"])
+        col = "cal_date" if "cal_date" in frame.columns else frame.columns[0]
+        days = sorted(pd.Timestamp(str(v)).strftime("%Y-%m-%d") for v in frame[col])
+        return pd.DataFrame({"trade_date": days})
 
     def _fetch_index_classify(self, config: Dict, fields) -> pd.DataFrame:
         """申万行业分类：https://tushare.pro/document/2?doc_id=181"""
@@ -289,6 +306,37 @@ class TushareDataSource(DataSourceBase):
         result = pd.concat(frames, ignore_index=True)
         print(f"[daily] {label} 合计 {len(result)} 行", flush=True)
         return result
+
+    def _fetch_index_daily_range(
+        self, getter: Callable, index_list: List[str], fields, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """按代码 + 年份拉取。index_daily 忽略 offset，不能走 getTushareInfo 翻页。"""
+        field_list = self._as_field_list(fields)
+        if not start_date or not end_date:
+            raise ValueError("指数日线需要 start_date/end_date")
+        start = pd.Timestamp(str(start_date))
+        end = pd.Timestamp(str(end_date))
+        parts = []
+        for index_code in index_list:
+            year = int(start.year)
+            while year <= int(end.year):
+                chunk_start = max(start, pd.Timestamp(year=year, month=1, day=1))
+                chunk_end = min(end, pd.Timestamp(year=year, month=12, day=31))
+                part = self._call_api(
+                    getter,
+                    {
+                        "ts_code": index_code,
+                        "start_date": chunk_start.strftime("%Y%m%d"),
+                        "end_date": chunk_end.strftime("%Y%m%d"),
+                    },
+                    field_list,
+                )
+                if part is not None and not part.empty:
+                    parts.append(part)
+                year += 1
+        if not parts:
+            return pd.DataFrame()
+        return pd.concat(parts, ignore_index=True)
 
     def _fetch_stk_limit(
         self, config: Dict, fields, start_date: str, end_date: str
@@ -697,6 +745,101 @@ class TushareDataSource(DataSourceBase):
                     periods.append(period.strftime("%Y%m%d"))
             year += 1
         return periods
+
+    def _fetch_fund_basic(self, config: Dict, fields) -> pd.DataFrame:
+        """场内基金列表：https://tushare.pro/document/2?doc_id=19"""
+        field_list = self._as_field_list(fields) or list(ETF_TUSHARE_BASIC_FIELDS)
+        market = config.get("market") or "E"
+        statuses = config.get("status") or ["L", "D"]
+        if isinstance(statuses, str):
+            statuses = [statuses]
+        frames = []
+        print(f"[etf_info] 拉取 fund_basic market={market} status={statuses}", flush=True)
+        for status in statuses:
+            part = self._call_api(
+                self.pro.fund_basic,
+                {"market": market, "status": status},
+                field_list,
+            )
+            rows = 0 if part is None or part.empty else len(part)
+            print(f"[etf_info] fund_basic status={status} -> {rows} 行", flush=True)
+            if part is None or part.empty:
+                continue
+            part = part.copy()
+            if "status" not in part.columns:
+                part["status"] = status
+            if "market" not in part.columns:
+                part["market"] = market
+            frames.append(part)
+            time.sleep(0.2)
+        result = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(columns=field_list)
+        )
+        if "ts_code" in result.columns and not result.empty:
+            result["ts_code"] = result["ts_code"].astype(str).str.upper()
+            result = result.drop_duplicates(subset=["ts_code"], keep="last")
+        extras = [
+            str(code).strip().upper()
+            for code in (config.get("extra_ts_codes") or ETF_EXTRA_TS_CODES)
+            if str(code).strip()
+        ]
+        have = set(result["ts_code"].astype(str)) if "ts_code" in result.columns else set()
+        missing = [code for code in extras if code not in have]
+        extra_frames = []
+        for code in missing:
+            part = self._call_api(self.pro.fund_basic, {"ts_code": code}, field_list)
+            rows = 0 if part is None or part.empty else len(part)
+            print(f"[etf_info] fund_basic extra {code} -> {rows} 行", flush=True)
+            if part is None or part.empty:
+                extra_frames.append(
+                    pd.DataFrame(
+                        {
+                            "ts_code": [code],
+                            "name": [""],
+                            "management": [""],
+                            "fund_type": [""],
+                            "market": [market],
+                            "status": ["L"],
+                            "list_date": [""],
+                            "delist_date": [""],
+                        }
+                    )
+                )
+            else:
+                extra_frames.append(part)
+            time.sleep(0.2)
+        if extra_frames:
+            result = pd.concat([result, *extra_frames], ignore_index=True)
+            if "ts_code" in result.columns:
+                result["ts_code"] = result["ts_code"].astype(str).str.upper()
+                result = result.drop_duplicates(subset=["ts_code"], keep="first")
+        result = self._filter_fund_codes(result, config)
+        print(f"[etf_info] fund_basic 合计 {len(result)} 行", flush=True)
+        return result
+
+    def _fetch_fund_daily(
+        self, config: Dict, fields, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """场内基金日线：https://tushare.pro/document/2?doc_id=127"""
+        field_list = self._as_field_list(fields) or list(ETF_TUSHARE_DAILY_FIELDS)
+        result = self._fetch_daily_by_day(
+            self.pro.fund_daily, field_list, start_date, end_date, "fund_daily"
+        )
+        return self._filter_fund_codes(result, config)
+
+    @staticmethod
+    def _filter_fund_codes(frame: pd.DataFrame, config: Dict) -> pd.DataFrame:
+        if frame is None or frame.empty or "ts_code" not in frame.columns:
+            return frame
+        wanted = config.get("etf_list") or config.get("symbols")
+        if not wanted:
+            return frame
+        codes = {str(code).strip().upper() for code in wanted if str(code).strip()}
+        out = frame.copy()
+        out["ts_code"] = out["ts_code"].astype(str).str.upper()
+        return out.loc[out["ts_code"].isin(codes)].copy()
 
     @staticmethod
     def _as_field_list(fields) -> Optional[List[str]]:

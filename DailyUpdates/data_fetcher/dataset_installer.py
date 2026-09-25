@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import datetime
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -15,7 +16,14 @@ from DailyUpdates.data_fetcher.data_fetcher import source_class_for_config
 from DailyUpdates.data_fetcher.data_source_base import FetchSlice
 from DailyUpdates.data_fetcher.preprocessing.market_bars import load_prev_adj
 
-SIDECAR_DATA_TYPES = {"industry", "stock_info", "financial", "index_constituent"}
+SIDECAR_DATA_TYPES = {
+    "industry",
+    "stock_info",
+    "financial",
+    "index_constituent",
+    "etf",
+    "etf_info",
+}
 _TRUNCATED_BY_DATE_APIS = {"stk_limit", "daily_basic", "adj_factor"}
 
 
@@ -71,10 +79,8 @@ class DatasetInstaller:
                 dataset_name, dataset_config, start_date, end_date
             )
 
-        is_index = dataset_config.get("data_type") == "index" or bool(
-            dataset_config.get("index_list")
-        )
-        stocks = set(stock_codes or self.storage.get_instruments())
+        is_index = str(dataset_config.get("data_type") or "") == "index"
+        stocks = set() if is_index else set(stock_codes or self.storage.get_instruments())
         if not stocks and not is_index:
             logger.error("数据库中没有可用于历史回填的股票")
             return False
@@ -301,6 +307,17 @@ class DatasetInstaller:
             # 含最新报告期，便于公告更正覆盖
             return "incremental", latest.replace("-", "")
 
+        if data_type == "etf" and api_name == "fund_daily":
+            latest = self.storage.get_latest_etf_date()
+            if not latest:
+                return "full", None
+            return "incremental", latest.replace("-", "")
+
+        if data_type == "etf_info" and api_name == "fund_basic":
+            if self.storage.count_etf_basic() == 0:
+                return "full", None
+            return "incremental", None
+
         # 未知 sidecar：保守全量
         return "full", None
 
@@ -323,6 +340,15 @@ class DatasetInstaller:
         api_name = dataset_config.get("api_name")
         cal_start, cal_end = self.storage.get_calendar_range()
         end = (end_date or cal_end or "").replace("-", "")
+
+        if data_type == "etf" and api_name == "fund_daily":
+            return self._write_etf_daily(
+                dataset_name,
+                dataset_config,
+                start_date=start_date,
+                end_date=end_date,
+                mode=mode,
+            )
 
         effective, incr_start = self._resolve_sidecar_mode(dataset_config, mode)
         if effective == "skip":
@@ -412,6 +438,95 @@ class DatasetInstaller:
         logger.info(f"数据集 {dataset_name} 写入完成，共 {written} 行")
         return True
 
+    def _write_etf_daily(
+        self,
+        dataset_name: str,
+        dataset_config: Dict,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        mode: str,
+    ) -> bool:
+        """场内基金日线写入 etf_data。按交易日历补缺日，不进 market_data。"""
+        del mode
+        cal_start, cal_end = self.storage.get_calendar_range()
+        start = (start_date or cal_start or "").replace("-", "")
+        end = (end_date or cal_end or "").replace("-", "")
+        if not start or not end:
+            logger.error("没有交易日历，无法写入 etf_daily")
+            return False
+        start_iso = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
+        end_iso = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+        missing = self.storage.list_etf_missing_dates(start_iso, end_iso)
+        if not missing:
+            logger.info(f"{dataset_name} 在 {start_iso} ~ {end_iso} 无需回填")
+            return True
+
+        classes = getattr(self.data_fetcher, "data_source_classes", None)
+        cls = source_class_for_config(dataset_config, classes)
+        range_window = bool(cls and cls.uses_range_window())
+        pause = float(dataset_config.get("pause_seconds") or 0.12)
+        today = datetime.date.today().strftime("%Y%m%d")
+        logger.info(
+            f"写入 {dataset_name}: {missing[0]} ~ {missing[-1]} "
+            f"共 {len(missing)} 个缺日 range_window={range_window}"
+        )
+
+        if range_window:
+            span_start = str(missing[0]).replace("-", "")
+            span_end = str(missing[-1]).replace("-", "")
+            try:
+                raw = self.data_fetcher.fetch_dataset(
+                    dataset_config, span_start, span_end
+                )
+            except Exception:
+                logger.exception(f"数据集 {dataset_name} 拉取失败")
+                return False
+            if raw is None or raw.empty:
+                if all(
+                    "".join(ch for ch in str(d) if ch.isdigit())[:8] >= today
+                    for d in missing
+                ):
+                    logger.info(
+                        "%s ~ %s 场内基金日线未就绪，跳过（不视为失败）",
+                        span_start,
+                        span_end,
+                    )
+                    return True
+                logger.error(f"数据集 {dataset_name} 未获取到数据")
+                return False
+            written = self.storage.upsert_etf_data(raw)
+            logger.info(f"{dataset_name} 区间写入 {written} 行")
+            return written > 0
+
+        written_total = 0
+        failed = []
+        skipped_unready = []
+        for trade_date in tqdm(missing, desc=f"写入{dataset_name}"):
+            ymd = str(trade_date).replace("-", "")
+            try:
+                raw = self.data_fetcher.fetch_dataset(dataset_config, ymd, ymd)
+            except Exception:
+                logger.exception(f"{dataset_name} {ymd} 拉取失败")
+                failed.append(trade_date)
+                continue
+            if raw is None or raw.empty:
+                if ymd >= today:
+                    skipped_unready.append(trade_date)
+                    logger.info("%s 场内基金日线未就绪，跳过", ymd)
+                else:
+                    failed.append(trade_date)
+                continue
+            written_total += self.storage.upsert_etf_data(raw)
+            if pause > 0:
+                time.sleep(pause)
+        if skipped_unready:
+            logger.info("未就绪交易日已跳过: %s", skipped_unready)
+        if failed:
+            logger.error("ETF 预期交易日写入 0 行: %s", failed)
+            return False
+        logger.info(f"{dataset_name} 写入完成，共 {written_total} 行")
+        return True
+
     def _persist_sidecar(
         self, dataset_config: Dict, data: pd.DataFrame, write_mode: str
     ) -> int:
@@ -451,6 +566,11 @@ class DatasetInstaller:
                     data, index_codes=dataset_config.get("index_list")
                 )
             return self.storage.upsert_index_constituents(data)
+
+        if data_type == "etf_info" and api_name == "fund_basic":
+            if write_mode == "full":
+                return self.storage.replace_etf_basic(data)
+            return self.storage.upsert_etf_basic(data)
 
         logger.error(
             f"不支持的 sidecar 组合: data_type={data_type}, api={api_name}"

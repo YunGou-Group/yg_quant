@@ -63,7 +63,18 @@ def test_plan_json_uses_qmt_codes(tmp_path: Path):
 def test_next_session_skips_asof():
     days = ["2026-09-01", "2026-09-02", "2026-09-03"]
     assert next_session("2026-09-01", days) == "2026-09-02"
-    assert next_session("2026-09-03", days) is None
+    with pytest.raises(ValueError, match="拒绝猜测节假日"):
+        next_session("2026-09-03", days)
+
+
+def test_empty_orders_mean_no_trade_today():
+    je = _json_exec()
+    payload = {
+        "holdings": [{"code": "600000.SH", "volume": 3000}],
+        "orders": [],
+    }
+    assert je.orders_from_payload(payload) == []
+    assert je.orders_from_payload({"holdings": [{"code": "600000.SH", "volume": 100}]}) is None
 
 
 def test_rebalance_does_not_sell_unknown_holdings():

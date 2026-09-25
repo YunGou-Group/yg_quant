@@ -78,11 +78,31 @@ def _sidecar_snapshot(config: Dict) -> Dict:
         "periods",
         "index_list",
         "optional_index_codes",
+        "etf_list",
+        "extra_ts_codes",
+        "market",
+        "status",
         "fields",
         "primary_key",
         "pause_seconds",
+        "market",
+        "status",
+        "extra_ts_codes",
+        "etf_list",
     )
     return {key: config.get(key) for key in keys if key in config}
+
+
+def _added_market_index_codes(old_config: Dict, new_config: Dict) -> List[str]:
+    """行情指数数据集（写入 market_data）新增的 ts_code。成分表走 sidecar 快照。"""
+    if str(new_config.get("data_type") or "") != "index":
+        return []
+    previous = {str(code) for code in (old_config.get("index_list") or [])}
+    return [
+        str(code)
+        for code in (new_config.get("index_list") or [])
+        if str(code) not in previous
+    ]
 
 
 class UnifiedScheduler:
@@ -140,7 +160,7 @@ class UnifiedScheduler:
                 },
             }
 
-        # 新增数据集 / 新增字段 → install
+        # 新增数据集 / 新增字段 / 行情指数名单扩容 → install
         for name, config in dataset_config.items():
             if name not in previous:
                 install_dataset_config[name] = config.copy()
@@ -154,12 +174,18 @@ class UnifiedScheduler:
             current_fields = _business_fields(config)
             old_fields = _business_fields(previous[name])
             new_fields = current_fields - old_fields
-            if new_fields:
-                install_config = config.copy()
+            added_indexes = _added_market_index_codes(previous[name], config)
+            if not new_fields and not added_indexes:
+                continue
+
+            install_config = config.copy()
+            if new_fields and not added_indexes:
                 install_config["fields"] = sorted(
                     new_fields | {"ts_code", "trade_date"}
                 )
-                install_dataset_config[name] = install_config
+            elif added_indexes and not new_fields:
+                install_config["index_list"] = added_indexes
+            install_dataset_config[name] = install_config
 
         # 删减数据集 / 删减字段
         for name, old_config in previous.items():
@@ -249,6 +275,12 @@ class UnifiedScheduler:
                     old_config.get("index_list")
                 )
                 logs.append(f"已删除指数成分数据集 {name}")
+            elif data_type == "etf" and api_name == "fund_daily":
+                self.storage.clear_etf_data()
+                logs.append(f"已清空 etf_data ({name})")
+            elif data_type == "etf_info":
+                self.storage.clear_etf_basic()
+                logs.append(f"已清空 etf_basic ({name})")
             elif data_type == "index" or old_config.get("index_list"):
                 # 行情指数行；勿误删 index_constituent 配置
                 if data_type == "index":

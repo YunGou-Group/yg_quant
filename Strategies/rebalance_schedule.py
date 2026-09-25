@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""topk / multifactor 调仓日程：日频、周频、每 N 个交易日。"""
+"""topk / icir / lgbm 调仓日程：日频、周频、每 N 个交易日。"""
 
 from __future__ import annotations
 

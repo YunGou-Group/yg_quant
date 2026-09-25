@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""多因子滚动 ICIR 加权 + Top N。
+"""滚动 LightGBM 合成 + Top N。
 
-用法：--strategy icir --factor a,b,c
+用法：--strategy lgbm --factor a,b,c
 因子名前加 '-' 表示取负。
 
 每个调仓日：
-1. 回看 lookback 个已实现持有期，逐日算 RankIC（因子 vs horizon 日收盘收益）
-2. ICIR_k = mean(IC)/std(IC)；负 ICIR 置 0 后归一化
-3. 当日得分 = Σ w_k · z(factor_k)，再选 Top N
+1. 回看 lookback 个已实现持有期，用当日截面 z(因子) 预测已实现远期收益
+   （收益先在当日截面去均值，只学相对排序）
+2. 用拟合模型对 asof 截面打分，再选 Top N
 
-只用 asof 及之前已实现的 t→t+H 收益，无前视。样本不足时回退等权 z-score。
+远期收益 r_t = close[t+horizon]/close[t] - 1，只用 asof 及之前已实现的收益。
+样本不足或未安装 lightgbm 时回退等权 z-score。
 """
 
 from __future__ import annotations
 
+import logging
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -33,61 +35,35 @@ from Strategies._factor_combo import (
 )
 from Strategies.rebalance_schedule import RebalanceGate, RebalanceSpec, parse_rebalance, spec_from_cli
 
-DEFAULT_MIN_OBS = 30
-DEFAULT_MIN_IC_DAYS = 20
+logger = logging.getLogger("Strategies.lgbm")
+
+DEFAULT_N = 50
+DEFAULT_MIN_ROWS = 400
+DEFAULT_MAX_ROWS = 120_000
+
+_LGB_PARAMS = {
+    "n_estimators": 80,
+    "learning_rate": 0.05,
+    "num_leaves": 8,
+    "min_child_samples": 200,
+    "subsample": 0.8,
+    "colsample_bytree": 1.0,
+    "reg_lambda": 1.0,
+    "random_state": 42,
+    "n_jobs": 1,
+    "verbosity": -1,
+}
 
 
-def _rank(values: np.ndarray) -> np.ndarray:
-    order = np.argsort(values, kind="mergesort")
-    ranks = np.empty(values.shape[0], dtype=np.float64)
-    ranks[order] = np.arange(1, values.shape[0] + 1, dtype=np.float64)
-    return ranks
-
-
-def spearman_ic(factor: np.ndarray, returns: np.ndarray, min_obs: int) -> float:
-    valid = np.isfinite(factor) & np.isfinite(returns)
-    n = int(valid.sum())
-    if n < max(3, int(min_obs)):
-        return float("nan")
-    rx = _rank(np.asarray(factor[valid], dtype=np.float64))
-    ry = _rank(np.asarray(returns[valid], dtype=np.float64))
-    rx -= rx.mean()
-    ry -= ry.mean()
-    den = float(np.sqrt(np.sum(rx * rx) * np.sum(ry * ry)))
-    if den < 1e-15:
-        return float("nan")
-    return float(np.sum(rx * ry) / den)
-
-
-def icir_weights(ics: np.ndarray, min_days: int) -> Optional[np.ndarray]:
-    """ics: (n_days, n_factors)。负 ICIR 置 0；全非正则 None（调用方回退等权）。"""
-    mat = np.asarray(ics, dtype=np.float64)
-    if mat.ndim == 1:
-        mat = mat[:, None]
-    n_f = mat.shape[1]
-    raw = np.zeros(n_f, dtype=np.float64)
-    need = max(2, int(min_days))
-    for k in range(n_f):
-        col = mat[:, k]
-        clean = col[np.isfinite(col)]
-        if clean.size < need:
-            continue
-        mu = float(np.mean(clean))
-        sd = float(np.std(clean, ddof=1))
-        if not np.isfinite(sd) or sd < 1e-12:
-            # IC 几乎常数：稳定为正则给很大 ICIR，否则不参与
-            if abs(mu) > 1e-12:
-                raw[k] = 1e6 if mu > 0 else -1e6
-            continue
-        raw[k] = mu / sd
-    clipped = np.maximum(raw, 0.0)
-    total = float(clipped.sum())
-    if total <= 0:
+def _try_lightgbm():
+    try:
+        import lightgbm as lgb
+    except ImportError:
         return None
-    return clipped / total
+    return lgb
 
 
-def combine_scores_icir(
+def stack_realized_xy(
     factor_hist: Sequence[np.ndarray],
     signs: Sequence[float],
     close_hist: np.ndarray,
@@ -95,22 +71,12 @@ def combine_scores_icir(
     *,
     lookback: int,
     horizon: int,
-    min_obs: int,
-    min_ic_days: int,
-) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    need = int(lookback) + int(horizon)
-    n_factors = len(factor_hist)
-    if n_factors == 0:
-        return np.full(close_hist.shape[1], np.nan, dtype=np.float64), None
-    today_uni = np.asarray(mask_hist[-1], dtype=bool)
-    today_panels = [np.asarray(p)[-1] for p in factor_hist]
-    for panel in factor_hist:
-        if np.asarray(panel).shape[0] < need:
-            return equal_weight_scores(today_panels, signs, today_uni), None
-
+) -> Tuple[np.ndarray, np.ndarray]:
+    """拼已实现样本。X 只用到 index lookback-1，不含 asof 所在的最后 horizon 行。"""
     close = np.asarray(close_hist, dtype=np.float64)
     mask = np.asarray(mask_hist, dtype=bool)
-    ics = np.full((int(lookback), n_factors), np.nan, dtype=np.float64)
+    xs: List[np.ndarray] = []
+    ys: List[np.ndarray] = []
     for i in range(int(lookback)):
         j = i + int(horizon)
         c0 = close[i]
@@ -119,13 +85,75 @@ def combine_scores_icir(
             y = c1 / c0 - 1.0
         y = np.where(np.isfinite(c0) & (c0 > 0) & np.isfinite(c1) & (c1 > 0), y, np.nan)
         uni = mask[i]
-        for k, (panel, sign) in enumerate(zip(factor_hist, signs)):
+        cols = []
+        for panel, sign in zip(factor_hist, signs):
             raw = np.asarray(panel[i], dtype=np.float64) * float(sign)
-            z = cross_section_z(raw, uni)
-            ics[i, k] = spearman_ic(z, y, min_obs=min_obs)
+            cols.append(cross_section_z(raw, uni))
+        x = np.column_stack(cols)
+        row_ok = uni & np.isfinite(y) & np.all(np.isfinite(x), axis=1)
+        if int(row_ok.sum()) < 8:
+            continue
+        yy = y[row_ok]
+        yy = yy - float(np.mean(yy))
+        xs.append(x[row_ok])
+        ys.append(yy)
+    if not xs:
+        return np.empty((0, len(factor_hist)), dtype=np.float64), np.empty(0, dtype=np.float64)
+    return np.vstack(xs), np.concatenate(ys)
 
-    w = icir_weights(ics, min_ic_days)
-    if w is None:
+
+def _subsample(x: np.ndarray, y: np.ndarray, max_rows: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+    n = int(x.shape[0])
+    if n <= max_rows:
+        return x, y
+    rng = np.random.default_rng(int(seed) % (2**31))
+    pick = rng.choice(n, size=int(max_rows), replace=False)
+    return x[pick], y[pick]
+
+
+def combine_scores_lgbm(
+    factor_hist: Sequence[np.ndarray],
+    signs: Sequence[float],
+    close_hist: np.ndarray,
+    mask_hist: np.ndarray,
+    *,
+    lookback: int,
+    horizon: int,
+    min_rows: int = DEFAULT_MIN_ROWS,
+) -> Tuple[np.ndarray, Optional[object]]:
+    """用已实现窗口训练 LightGBM，对末日截面打分。失败则等权回退。"""
+    need = int(lookback) + int(horizon)
+    today_uni = np.asarray(mask_hist[-1], dtype=bool)
+    today_panels = [np.asarray(p)[-1] for p in factor_hist]
+    if not factor_hist:
+        return np.full(close_hist.shape[1], np.nan, dtype=np.float64), None
+    for panel in factor_hist:
+        if np.asarray(panel).shape[0] < need:
+            return equal_weight_scores(today_panels, signs, today_uni), None
+
+    lgb = _try_lightgbm()
+    if lgb is None:
+        logger.warning("未安装 lightgbm，lgbm 策略回退等权 z-score")
+        return equal_weight_scores(today_panels, signs, today_uni), None
+
+    x, y = stack_realized_xy(
+        factor_hist,
+        signs,
+        close_hist,
+        mask_hist,
+        lookback=lookback,
+        horizon=horizon,
+    )
+    need_rows = max(int(min_rows), 80 * len(factor_hist))
+    if x.shape[0] < need_rows:
+        return equal_weight_scores(today_panels, signs, today_uni), None
+    x, y = _subsample(x, y, DEFAULT_MAX_ROWS, seed=42 + int(lookback) + int(horizon))
+
+    model = lgb.LGBMRegressor(**_LGB_PARAMS)
+    try:
+        model.fit(x, y)
+    except Exception:
+        logger.exception("LightGBM 拟合失败，回退等权")
         return equal_weight_scores(today_panels, signs, today_uni), None
 
     z_cols = []
@@ -134,34 +162,33 @@ def combine_scores_icir(
         z_cols.append(cross_section_z(raw, today_uni))
     z = np.column_stack(z_cols)
     score = np.full(today_uni.shape, np.nan, dtype=np.float64)
-    finite = np.isfinite(z)
-    w_row = np.where(finite, w[None, :], 0.0)
-    w_sum = w_row.sum(axis=1)
-    contrib = np.where(finite, z * w[None, :], 0.0).sum(axis=1)
-    ok = today_uni & (w_sum > 0)
-    score[ok] = contrib[ok] / w_sum[ok]
-    return score, w
+    ok = today_uni & np.all(np.isfinite(z), axis=1)
+    if int(ok.sum()) == 0:
+        return equal_weight_scores(today_panels, signs, today_uni), None
+    pred = np.asarray(model.predict(z[ok]), dtype=np.float64)
+    score[ok] = pred
+    return score, model
 
 
-class IcirWeightedTopK(Strategy):
-    name = "icir"
+class LgbmWeightedTopK(Strategy):
+    name = "lgbm"
 
     @classmethod
     def from_cli(cls, args, allocator):
         if not args.factor:
-            raise SystemExit("icir 需要 --factor，逗号分隔，如 a,b,c")
+            raise SystemExit("lgbm 需要 --factor，逗号分隔，如 a,b,c")
         try:
             legs = parse_factor_list(args.factor)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        n = args.n if args.n is not None else 50
-        spec = spec_from_cli(getattr(args, "rebalance", None) or "daily")
+        n = args.n if args.n is not None else DEFAULT_N
+        spec = spec_from_cli(getattr(args, "rebalance", None) or "20")
         lookback = int(getattr(args, "lookback", None) or DEFAULT_LOOKBACK)
         horizon = int(getattr(args, "horizon", None) or DEFAULT_HORIZON)
-        if lookback < 10:
-            raise SystemExit("icir --lookback 至少为 10")
+        if lookback < 20:
+            raise SystemExit("lgbm --lookback 至少为 20")
         if horizon < 1:
-            raise SystemExit("icir --horizon 至少为 1")
+            raise SystemExit("lgbm --horizon 至少为 1")
         return cls(
             legs,
             n=n,
@@ -175,10 +202,10 @@ class IcirWeightedTopK(Strategy):
     def cli_fields(cls):
         return [
             cli_field("factor", "因子列表", "str", required=True, placeholder="a,b,-c"),
-            n_field(50),
-            rebalance_field("daily", placeholder="daily / weekly / 20"),
-            cli_field("lookback", "ICIR回看天数", "int", default=DEFAULT_LOOKBACK),
-            cli_field("horizon", "IC持有期", "int", default=DEFAULT_HORIZON),
+            n_field(DEFAULT_N),
+            rebalance_field("20", placeholder="daily / weekly / 20"),
+            cli_field("lookback", "LGBM回看天数", "int", default=DEFAULT_LOOKBACK),
+            cli_field("horizon", "LGBM持有期", "int", default=DEFAULT_HORIZON),
         ]
 
     @classmethod
@@ -196,24 +223,23 @@ class IcirWeightedTopK(Strategy):
     def run_tag(cls, args) -> str:
         legs = parse_factor_list(args.factor)
         parts = [("m" if s < 0 else "") + n for n, s in legs]
-        tag = "icir_" + "_".join(parts)
-        spec = parse_rebalance(getattr(args, "rebalance", None) or "daily")
+        tag = "lgbm_" + "_".join(parts)
+        spec = parse_rebalance(getattr(args, "rebalance", None) or "20")
         tag += spec.tag_suffix()
         lookback = int(getattr(args, "lookback", None) or DEFAULT_LOOKBACK)
         horizon = int(getattr(args, "horizon", None) or DEFAULT_HORIZON)
-        tag += f"_icir{lookback}h{horizon}"
+        tag += f"_lgb{lookback}h{horizon}"
         return tag
 
     def __init__(
         self,
         factors: Sequence[FactorLeg] | Sequence[str],
-        n: int = 50,
+        n: int = DEFAULT_N,
         allocator: Allocator | None = None,
-        rebalance: str | RebalanceSpec = "daily",
+        rebalance: str | RebalanceSpec = "20",
         lookback: int = DEFAULT_LOOKBACK,
         horizon: int = DEFAULT_HORIZON,
-        min_obs: int = DEFAULT_MIN_OBS,
-        min_ic_days: int = DEFAULT_MIN_IC_DAYS,
+        min_rows: int = DEFAULT_MIN_ROWS,
     ):
         legs: List[FactorLeg] = []
         for item in factors:
@@ -223,25 +249,24 @@ class IcirWeightedTopK(Strategy):
                 name, sign = item
                 legs.append((str(name), float(sign)))
         if not legs:
-            raise ValueError("icir 至少需要一个因子")
+            raise ValueError("lgbm 至少需要一个因子")
         self.legs = legs
         self.n = max(1, int(n))
         self.allocator = allocator or EqualWeight()
         self.rebalance = (
             parse_rebalance(rebalance) if not isinstance(rebalance, RebalanceSpec) else rebalance
         )
-        self.lookback = max(10, int(lookback))
+        self.lookback = max(20, int(lookback))
         self.horizon = max(1, int(horizon))
-        self.min_obs = max(10, int(min_obs))
-        self.min_ic_days = max(5, int(min_ic_days))
+        self.min_rows = max(80, int(min_rows))
         self._gate = RebalanceGate(self.rebalance)
-        self.last_weights: Optional[np.ndarray] = None
+        self.last_model: Optional[object] = None
 
     @property
     def factor_names(self) -> List[str]:
         return [name for name, _ in self.legs]
 
-    def _icir_score(self, ctx: DayContext) -> np.ndarray:
+    def _lgbm_score(self, ctx: DayContext) -> np.ndarray:
         need = self.lookback + self.horizon
         close = ctx.history("close", need)
         t1 = int(ctx._t) + 1
@@ -252,17 +277,16 @@ class IcirWeightedTopK(Strategy):
             mask = np.vstack([pad, mask])
         signs = [sign for _, sign in self.legs]
         factor_hist = [ctx.history(name, need) for name, _ in self.legs]
-        score, weights = combine_scores_icir(
+        score, model = combine_scores_lgbm(
             factor_hist,
             signs,
             close,
             mask,
             lookback=self.lookback,
             horizon=self.horizon,
-            min_obs=self.min_obs,
-            min_ic_days=self.min_ic_days,
+            min_rows=self.min_rows,
         )
-        self.last_weights = weights
+        self.last_model = model
         return score
 
     def score(self, ctx: DayContext) -> TargetHoldings:
@@ -270,7 +294,7 @@ class IcirWeightedTopK(Strategy):
         if held is not None:
             return held
 
-        values = self._icir_score(ctx)
+        values = self._lgbm_score(ctx)
         tradable = ctx.universe() & np.isfinite(values)
         ranked = np.where(tradable, values, -np.inf)
         k = int(min(self.n, int(tradable.sum())))

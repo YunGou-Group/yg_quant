@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import ChartPanel from "../components/charts/ChartPanel.vue";
 import ReturnsFlow from "../components/ReturnsFlow.vue";
 import {
@@ -28,8 +28,10 @@ const form = reactive({
   allocator_lookback: 252,
   max_weight: 1,
   cash: 1000000,
-  commission: 0.0003,
+  commission: 0.0001,
   stamp: 0.0005,
+  slippage: 0.00258,
+  min_commission: 5,
   mu_model: "geometric",
   risk_free_rate: 0.02,
   risk_aversion: 1,
@@ -62,8 +64,52 @@ const strategyFields = computed(() => {
 const universes = computed(() => {
   const items = meta.value?.universes;
   if (items?.length) return items;
-  return [{ name: "all", description: "" }];
+  return [{ name: "all", description: "", benchmark: "", benchmark_label: "" }];
 });
+
+const benchmarkChoices = computed(() => {
+  const fromMeta = meta.value?.benchmarks;
+  if (fromMeta?.length) {
+    return fromMeta.map((row) => ({
+      value: row.value,
+      label: row.label || row.value,
+    }));
+  }
+  const seen = new Set();
+  const rows = [];
+  for (const item of universes.value) {
+    const code = item.benchmark;
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    rows.push({ value: code, label: item.benchmark_label || code });
+  }
+  const current = form.benchmark;
+  if (current && !seen.has(current)) {
+    rows.push({ value: current, label: current });
+  }
+  return rows;
+});
+
+function benchmarkOf(universe) {
+  const item = universes.value.find((row) => row.name === universe);
+  return item?.benchmark || "";
+}
+
+function labelOfBenchmark(code) {
+  if (!code) return "";
+  const hit = benchmarkChoices.value.find((row) => row.value === code);
+  if (hit?.label) return hit.label;
+  const item = universes.value.find((row) => row.benchmark === code);
+  return item?.benchmark_label || code;
+}
+
+watch(
+  () => form.universe,
+  (name) => {
+    const next = benchmarkOf(name);
+    if (next) form.benchmark = next;
+  },
+);
 
 const traces = computed(() => {
   const equity = result.value?.equity;
@@ -78,12 +124,14 @@ const traces = computed(() => {
     },
   ];
   if (equity.benchmark?.length) {
+    const code = result.value?.params?.benchmark || form.benchmark;
+    const label = labelOfBenchmark(code);
     lines.push({
       x: equity.dates,
       y: equity.benchmark,
       type: "scatter",
       mode: "lines",
-      name: "基准",
+      name: label ? `基准（${label}）` : "基准",
     });
   }
   return lines;
@@ -92,6 +140,7 @@ const traces = computed(() => {
 const kpis = computed(() => {
   const m = result.value?.metrics;
   if (!m) return [];
+  const benchName = labelOfBenchmark(result.value?.params?.benchmark || form.benchmark);
   return [
     { label: "累计收益", value: pct(m.total_return) },
     { label: "年化", value: pct(m.annualized) },
@@ -100,7 +149,7 @@ const kpis = computed(() => {
     { label: "夏普", value: num(m.sharpe) },
     { label: "Calmar", value: num(m.calmar) },
     { label: "日均换手", value: pct(m.turnover_mean) },
-    { label: "超额年化", value: pct(m.excess_annualized) },
+    { label: benchName ? `超额年化（${benchName}）` : "超额年化", value: pct(m.excess_annualized) },
     { label: "交易日", value: m.n_days == null ? "—" : String(m.n_days) },
   ];
 });
@@ -194,26 +243,58 @@ function applyDefaults(data) {
   form.start = d.start || form.start;
   form.end = d.end || "";
   form.universe = d.universe || "all";
+  form.benchmark = benchmarkOf(form.universe) || d.benchmark || "";
   form.allocator = d.allocator || "equal";
   form.allocator_lookback = d.allocator_lookback ?? 252;
   form.max_weight = d.max_weight ?? 1;
   form.cash = d.cash ?? 1000000;
-  form.commission = d.commission ?? 0.0003;
+  form.commission = d.commission ?? 0.0001;
   form.stamp = d.stamp ?? 0.0005;
+  form.slippage = d.slippage ?? 0.00258;
+  form.min_commission = d.min_commission ?? 5;
   form.mu_model = d.mu_model || "geometric";
   form.risk_free_rate = d.risk_free_rate ?? 0.02;
   form.risk_aversion = d.risk_aversion ?? 1;
   form.l2_gamma = d.l2_gamma ?? 0.1;
   form.tc_rate = d.tc_rate ?? 0.001;
   form.tail_confidence = d.tail_confidence ?? 0.95;
-  form.benchmark = d.benchmark || "";
   form.hold = d.hold ?? 6;
   form.n = d.n ?? null;
   form.rebalance = "daily";
   form.lookback = 60;
   form.horizon = 5;
   form.anti_tail = Boolean(d.anti_tail);
+  applyStrategyCosts(form.strategy);
+  applyStrategyFields(form.strategy);
 }
+
+function applyStrategyCosts(name) {
+  const item = (meta.value?.strategies || []).find((row) => row.name === name);
+  const costs = item?.costs;
+  if (!costs) return;
+  if (costs.commission != null) form.commission = costs.commission;
+  if (costs.stamp != null) form.stamp = costs.stamp;
+  if (costs.slippage != null) form.slippage = costs.slippage;
+  if (costs.min_commission != null) form.min_commission = costs.min_commission;
+}
+
+function applyStrategyFields(name) {
+  const item = (meta.value?.strategies || []).find((row) => row.name === name);
+  const fields = item?.fields || [];
+  if (fields.some((field) => field.key === "n")) form.n = null;
+  const rebalance = fields.find((field) => field.key === "rebalance");
+  if (rebalance?.default != null) form.rebalance = rebalance.default;
+}
+
+watch(
+  () => form.strategy,
+  (name) => {
+    if (meta.value) {
+      applyStrategyCosts(name);
+      applyStrategyFields(name);
+    }
+  },
+);
 
 function body() {
   const payload = {
@@ -227,6 +308,8 @@ function body() {
     cash: Number(form.cash),
     commission: Number(form.commission),
     stamp: Number(form.stamp),
+    slippage: Number(form.slippage),
+    min_commission: Number(form.min_commission),
     mu_model: form.mu_model,
     risk_free_rate: Number(form.risk_free_rate),
     risk_aversion: Number(form.risk_aversion),
@@ -240,7 +323,9 @@ function body() {
   if (fieldOf("factor")) payload.factor = form.factor || null;
   if (fieldOf("hold")) payload.hold = form.hold == null || form.hold === "" ? null : Number(form.hold);
   if (fieldOf("n") && form.n != null && form.n !== "") payload.n = Number(form.n);
-  if (fieldOf("rebalance")) payload.rebalance = form.rebalance || "daily";
+  if (fieldOf("rebalance")) {
+    payload.rebalance = form.rebalance || fieldOf("rebalance")?.default || "daily";
+  }
   if (fieldOf("lookback") && form.lookback != null && form.lookback !== "") {
     payload.lookback = Number(form.lookback);
   }
@@ -259,7 +344,7 @@ function body() {
 async function run() {
   if (fieldOf("factor") && !String(form.factor || "").trim()) {
     statusError.value = true;
-    status.value = "请填写因子名（multifactor 用逗号分隔，如 a,b,c）。";
+    status.value = "请填写因子名（icir / lgbm 用逗号分隔，如 a,b,c）。";
     return;
   }
   const current = ++runToken;
@@ -505,6 +590,14 @@ onMounted(async () => {
           </option>
         </select>
       </label>
+      <label class="field">
+        基准
+        <select v-model="form.benchmark" :disabled="form.no_benchmark">
+          <option v-for="item in benchmarkChoices" :key="item.value" :value="item.value">
+            {{ item.label }}
+          </option>
+        </select>
+      </label>
       <label v-if="fieldOf('factor')" class="field">
         {{ fieldOf("factor")?.label || "因子" }}
         <input
@@ -563,6 +656,14 @@ onMounted(async () => {
         <label class="field">
           印花税（卖出）
           <input v-model.number="form.stamp" type="number" min="0" step="0.0001" />
+        </label>
+        <label class="field">
+          滑点
+          <input v-model.number="form.slippage" type="number" min="0" step="0.0001" />
+        </label>
+        <label class="field">
+          最低佣金
+          <input v-model.number="form.min_commission" type="number" min="0" step="1" />
         </label>
         <label class="field">
           单票上限

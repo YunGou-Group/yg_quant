@@ -19,7 +19,7 @@ import argparse
 from datetime import datetime
 
 from FactorEvaluates.market_panel_loader import HS300_SYMBOL, MarketPanelLoader
-from yg_quant_repo import default_data_dir
+from yg_quant_repo import strategy_runs_dir
 
 from .backtest import Engine, summarize, trades_frame, write_run_snapshot
 from .allocators import REGISTRY
@@ -29,7 +29,7 @@ from Universes.catalog import names as universe_names
 
 from .catalog import by_name
 from .live import default_order_path, plan_live
-from .run import build, _run_params
+from .run import _bind_benchmark, apply_cost_defaults, build, _run_params
 
 
 def main() -> None:
@@ -63,30 +63,30 @@ def main() -> None:
     parser.add_argument(
         "--factor",
         default=None,
-        help="topk：单因子名；multifactor / icir：逗号分隔，如 a,b,-c（前缀 - 取负）",
+        help="topk：单因子名；equal / icir / lgbm：逗号分隔，如 a,b,-c（前缀 - 取负）",
     )
     parser.add_argument(
         "--n",
         type=int,
         default=None,
-        help="topk / multifactor / icir 持仓数，或小市值候选数",
+        help="持仓数：topk / equal / icir / lgbm，或小市值候选数",
     )
     parser.add_argument(
         "--rebalance",
         default="daily",
-        help="topk / multifactor / icir 调仓：daily、weekly（周五收盘），或 N 个交易日如 5 / 20 / every20",
+        help="topk / equal / icir / lgbm 调仓：daily、weekly（周五收盘），或 N 个交易日如 5 / 20 / every20",
     )
     parser.add_argument(
         "--lookback",
         type=int,
         default=None,
-        help="multifactor / icir：回归或 ICIR 回看交易日数，默认 60",
+        help="icir / lgbm：回看交易日数，默认 60",
     )
     parser.add_argument(
         "--horizon",
         type=int,
         default=None,
-        help="multifactor / icir：远期收益持有交易日，默认 5",
+        help="icir / lgbm：远期收益持有交易日，默认 5",
     )
     parser.add_argument("--hold", type=int, default=HOLD_N, help="小市值：剔除最小后取到第 N 名")
     parser.add_argument("--anti-tail", action="store_true", help="小市值防尾声")
@@ -136,23 +136,49 @@ def main() -> None:
     parser.add_argument(
         "--run",
         default=None,
-        help="attribute：回测快照 id（strategy_runs 下 json 名）或 JSON 路径",
+        help="attribute：回测快照 id（strategy_runs/backtest 下 json 名）或 JSON 路径",
     )
     parser.add_argument(
         "--qmt-json",
         default=None,
-        help="实盘对接 JSON 路径，默认 data/strategy_runs/qmt_orders.json",
+        help="实盘对接 JSON 路径，默认 data/strategy_runs/live/qmt_orders.json",
     )
-    parser.add_argument("--commission", type=float, default=0.0003)
-    parser.add_argument("--stamp", type=float, default=0.0005)
+    parser.add_argument(
+        "--commission",
+        type=float,
+        default=None,
+        help="佣金费率，默认 0.0001（万一）",
+    )
+    parser.add_argument(
+        "--stamp",
+        type=float,
+        default=None,
+        help="卖出印花税；默认股票 0.0005，场内基金策略 0",
+    )
+    parser.add_argument(
+        "--slippage",
+        type=float,
+        default=None,
+        help="成交价滑点（买入上浮、卖出下调），默认 0.00258",
+    )
+    parser.add_argument(
+        "--min-commission",
+        type=float,
+        default=None,
+        dest="min_commission",
+        help="单笔最低佣金（元），默认 5",
+    )
     parser.add_argument("--out", default=None, help="回测净值 CSV / 归因 JSON 路径")
     parser.add_argument(
         "--benchmark",
-        default=HS300_SYMBOL,
-        help="基准指数代码，默认沪深300；空字符串关闭",
+        default=None,
+        help="基准指数代码；默认跟股票池走（如 zz1000→中证1000）",
     )
     parser.add_argument("--no-benchmark", action="store_true", help="关闭基准对照")
     args = parser.parse_args()
+    apply_cost_defaults(args)
+    if not args.no_benchmark:
+        args.benchmark = _bind_benchmark(args.universe, args.benchmark)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(message)s",
@@ -174,10 +200,12 @@ def main() -> None:
         initial_cash=args.cash,
         commission=args.commission,
         stamp=args.stamp,
+        slippage=args.slippage,
+        min_commission=args.min_commission,
     ).run(strategy)
     equity = result.equity()
     out = Path(args.out) if args.out else (
-        default_data_dir() / "strategy_runs" / f"{tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        strategy_runs_dir("backtest") / f"{tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     equity.to_csv(out, encoding="utf-8")

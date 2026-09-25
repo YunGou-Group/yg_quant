@@ -389,14 +389,14 @@ class FactorUpdater:
             self.logger.warning("没有发现可计算的因子")
             return []
 
-        # 默认截止日 = 交易日历末日（trade_calendar MAX），不扫 market_data。
+        # 截止日用行情最后一根 K 线。trade_calendar 会超前写入未来开市日，不能当数据终点。
         if end_date is None:
             end_date = self.storage.get_latest_market_date()
         if not end_date:
-            self.logger.error("交易日历为空，无法确定因子 end_date")
+            self.logger.error("行情表为空，无法确定因子 end_date")
             return []
         end_date = _parse_date(end_date)
-        self.logger.info("因子更新 end_date=%s（交易日历）", end_date)
+        self.logger.info("因子更新 end_date=%s（行情最后交易日）", end_date)
 
         # 用库内交易日历对齐 bin 轴（只增不改序）
         cal_dates = self.storage.list_trade_dates(end_date=end_date)

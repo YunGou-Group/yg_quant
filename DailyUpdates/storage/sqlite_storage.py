@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import pandas as pd
 
+from .etf_schema import ETF_BASIC_COLUMNS
 from .financial_schema import FINANCIAL_KEY_COLUMNS, FINANCIAL_VALUE_FIELDS
 
 
@@ -170,6 +171,27 @@ class SQLiteStorage:
                     ON index_constituent (trade_date);
                 CREATE INDEX IF NOT EXISTS idx_index_constituent_symbol
                     ON index_constituent (symbol);
+
+                CREATE TABLE IF NOT EXISTS etf_basic (
+                    symbol TEXT PRIMARY KEY,
+                    name TEXT,
+                    management TEXT,
+                    fund_type TEXT,
+                    market TEXT,
+                    status TEXT,
+                    list_date TEXT,
+                    delist_date TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_etf_basic_list_date
+                    ON etf_basic (list_date);
+
+                CREATE TABLE IF NOT EXISTS etf_data (
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    PRIMARY KEY (symbol, trade_date)
+                );
+                CREATE INDEX IF NOT EXISTS idx_etf_data_date
+                    ON etf_data (trade_date);
                 """
             )
             self._migrate_financial_indicator(connection)
@@ -489,12 +511,22 @@ class SQLiteStorage:
         with self._connect() as connection:
             return {row["symbol"] for row in connection.execute(sql)}
 
+    def list_index_symbols(self) -> List[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT symbol FROM instruments "
+                "WHERE is_index = 1 OR symbol LIKE 'index_%' "
+                "ORDER BY symbol"
+            ).fetchall()
+        return [str(row["symbol"]) for row in rows]
+
     def get_latest_market_date(self) -> Optional[str]:
+        """行情表里最后一根 K 线的日期。不含 trade_calendar 里尚未拉行情的未来开市日。"""
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT MAX(trade_date) AS latest FROM trade_calendar"
+                "SELECT MAX(trade_date) AS latest FROM market_data"
             ).fetchone()
-            return row["latest"] if row else None
+            return row["latest"] if row and row["latest"] else None
 
     def list_trade_dates(
         self,
@@ -516,6 +548,27 @@ class SQLiteStorage:
                 params,
             ).fetchall()
         return [row["trade_date"] for row in rows]
+
+    def upsert_trade_calendar(self, dates: Sequence[str]) -> int:
+        """写入交易所开市日（含尚未拉行情的未来日），节假日以远端 trade_cal 为准。"""
+        rows = []
+        seen = set()
+        for raw in dates:
+            if raw is None or str(raw).strip() == "":
+                continue
+            day = self._date_string(raw)
+            if day in seen:
+                continue
+            seen.add(day)
+            rows.append((day,))
+        if not rows:
+            return 0
+        with self._connect() as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO trade_calendar (trade_date) VALUES (?)",
+                rows,
+            )
+        return len(rows)
 
     def get_calendar_range(self) -> Tuple[Optional[str], Optional[str]]:
         with self._connect() as connection:
@@ -1379,3 +1432,254 @@ class SQLiteStorage:
             for row in frame[columns].itertuples(index=False, name=None)
         ]
         return columns, rows
+
+    def _ensure_etf_columns(
+        self, connection: sqlite3.Connection, fields: Iterable[str]
+    ) -> None:
+        existing = {
+            row["name"] for row in connection.execute("PRAGMA table_info(etf_data)")
+        }
+        for field in sorted(set(fields) - _SYSTEM_COLUMNS):
+            field = self._validate_identifier(field)
+            if field not in existing:
+                connection.execute(f'ALTER TABLE etf_data ADD COLUMN "{field}" REAL')
+
+    def upsert_etf_data(self, data: pd.DataFrame) -> int:
+        """写入场内基金日线。不碰 instruments / market_data。"""
+        if data is None or data.empty:
+            return 0
+
+        frame = data.copy()
+        if "ts_code" in frame.columns:
+            frame["symbol"] = frame["ts_code"].astype(str).map(self._to_repo_symbol)
+        elif "symbol" in frame.columns:
+            frame["symbol"] = frame["symbol"].astype(str).map(self._to_repo_symbol)
+        if "date" not in frame.columns and "trade_date" in frame.columns:
+            frame["date"] = frame["trade_date"]
+        if not {"symbol", "date"}.issubset(frame.columns):
+            raise ValueError("ETF 行情必须包含 symbol/date 或 ts_code/trade_date 列")
+
+        frame = frame.dropna(subset=["symbol", "date"]).copy()
+        frame["symbol"] = frame["symbol"].astype(str)
+        frame["trade_date"] = frame["date"].map(self._date_string)
+        frame = frame.drop(columns=["date"], errors="ignore")
+        drop = [col for col in ("ts_code",) if col in frame.columns]
+        if drop:
+            frame = frame.drop(columns=drop)
+        frame = frame.drop_duplicates(["symbol", "trade_date"], keep="last")
+
+        fields = [
+            self._validate_identifier(column)
+            for column in frame.columns
+            if column not in {"symbol", "trade_date"}
+        ]
+        columns = ["symbol", "trade_date", *fields]
+        placeholders = ", ".join("?" for _ in columns)
+        quoted_columns = ", ".join(f'"{column}"' for column in columns)
+        if fields:
+            updates = ", ".join(
+                f'"{field}" = COALESCE(excluded."{field}", "{field}")'
+                for field in fields
+            )
+            conflict_sql = f"DO UPDATE SET {updates}"
+        else:
+            conflict_sql = "DO NOTHING"
+        sql = (
+            f"INSERT INTO etf_data ({quoted_columns}) VALUES ({placeholders}) "
+            f"ON CONFLICT(symbol, trade_date) {conflict_sql}"
+        )
+        rows = [
+            tuple(self._database_value(value) for value in row)
+            for row in frame[columns].itertuples(index=False, name=None)
+        ]
+        dates = [(date,) for date in sorted(frame["trade_date"].unique())]
+        with self._connect() as connection:
+            self._ensure_etf_columns(connection, fields)
+            connection.executemany(sql, rows)
+            connection.executemany(
+                "INSERT OR IGNORE INTO trade_calendar (trade_date) VALUES (?)", dates
+            )
+        return len(rows)
+
+    def read_etf_data(
+        self,
+        fields: Optional[Sequence[str]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        symbols: Optional[Sequence[str]] = None,
+        ordered: bool = True,
+    ) -> pd.DataFrame:
+        available = set(self.get_etf_fields())
+        requested = list(fields) if fields is not None else sorted(available)
+        missing = set(requested) - available
+        if missing:
+            raise ValueError(f"etf_data 中不存在字段: {sorted(missing)}")
+        requested = [self._validate_identifier(field) for field in requested]
+        select_columns = [
+            "symbol AS ts_code",
+            "trade_date",
+            *(f'"{field}"' for field in requested),
+        ]
+        clauses: List[str] = []
+        params: List[str] = []
+        if start_date:
+            clauses.append("trade_date >= ?")
+            params.append(self._date_string(start_date))
+        if end_date:
+            clauses.append("trade_date <= ?")
+            params.append(self._date_string(end_date))
+        if symbols:
+            placeholders = ", ".join("?" for _ in symbols)
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(self._to_repo_symbol(str(symbol)) for symbol in symbols)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_sql = " ORDER BY symbol, trade_date" if ordered else ""
+        sql = (
+            f"SELECT {', '.join(select_columns)} FROM etf_data{where}{order_sql}"
+        )
+        with self._connect() as connection:
+            return pd.read_sql_query(sql, connection, params=params)
+
+    def get_etf_fields(self) -> List[str]:
+        with self._connect() as connection:
+            return [
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(etf_data)")
+                if row["name"] not in {"symbol", "trade_date"}
+            ]
+
+    def get_latest_etf_date(self) -> Optional[str]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(trade_date) AS latest FROM etf_data"
+            ).fetchone()
+            return row["latest"] if row and row["latest"] else None
+
+    def list_etf_dates(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[str]:
+        clauses: List[str] = []
+        params: List[str] = []
+        if start_date:
+            clauses.append("trade_date >= ?")
+            params.append(self._date_string(start_date))
+        if end_date:
+            clauses.append("trade_date <= ?")
+            params.append(self._date_string(end_date))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT DISTINCT trade_date FROM etf_data{where} "
+                "ORDER BY trade_date",
+                params,
+            ).fetchall()
+        return [row["trade_date"] for row in rows]
+
+    def list_etf_missing_dates(
+        self, start_date: Optional[str] = None, end_date: Optional[str] = None
+    ) -> List[str]:
+        """交易日历里还没有 etf_data 行的日期。"""
+        calendar = self.list_trade_dates(start_date=start_date, end_date=end_date)
+        if not calendar:
+            return []
+        have = set(self.list_etf_dates(start_date=start_date, end_date=end_date))
+        return [day for day in calendar if day not in have]
+
+    def get_etf_instruments(self) -> Set[str]:
+        with self._connect() as connection:
+            return {
+                row["symbol"]
+                for row in connection.execute("SELECT DISTINCT symbol FROM etf_data")
+            }
+
+    def clear_etf_data(self) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM etf_data")
+
+    def replace_etf_basic(self, data: pd.DataFrame) -> int:
+        prepared = self._prepare_etf_basic(data)
+        if prepared is None:
+            return 0
+        columns, rows = prepared
+        with self._connect() as connection:
+            connection.execute("DELETE FROM etf_basic")
+            connection.executemany(
+                f"INSERT INTO etf_basic ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                rows,
+            )
+        return len(rows)
+
+    def upsert_etf_basic(self, data: pd.DataFrame) -> int:
+        prepared = self._prepare_etf_basic(data)
+        if prepared is None:
+            return 0
+        columns, rows = prepared
+        updates = ", ".join(
+            f"{field} = excluded.{field}"
+            for field in columns
+            if field != "symbol"
+        )
+        sql = (
+            f"INSERT INTO etf_basic ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)}) "
+            f"ON CONFLICT(symbol) DO UPDATE SET {updates}"
+        )
+        with self._connect() as connection:
+            connection.executemany(sql, rows)
+        return len(rows)
+
+    def _prepare_etf_basic(self, data: pd.DataFrame):
+        if data is None or data.empty:
+            return None
+        frame = data.copy()
+        if "ts_code" in frame.columns:
+            frame["symbol"] = frame["ts_code"].astype(str).map(self._to_repo_symbol)
+        elif "symbol" in frame.columns:
+            frame["symbol"] = frame["symbol"].astype(str).map(self._to_repo_symbol)
+        columns = list(ETF_BASIC_COLUMNS)
+        for column in columns:
+            if column not in frame.columns:
+                frame[column] = None
+        frame = frame.dropna(subset=["symbol"]).copy()
+        frame["symbol"] = frame["symbol"].astype(str)
+        for date_col in ("list_date", "delist_date"):
+            frame[date_col] = frame[date_col].map(self._ymd8)
+        for text_col in ("name", "management", "fund_type", "market", "status"):
+            frame[text_col] = (
+                frame[text_col].fillna("").astype(str).replace({"nan": "", "None": ""})
+            )
+        frame = frame.drop_duplicates(["symbol"], keep="last")
+        rows = [
+            tuple(self._database_value(value) for value in row)
+            for row in frame[columns].itertuples(index=False, name=None)
+        ]
+        return columns, rows
+
+    def read_etf_basic(self, symbols: Optional[Sequence[str]] = None) -> pd.DataFrame:
+        clauses = []
+        params: List[str] = []
+        if symbols:
+            placeholders = ", ".join("?" for _ in symbols)
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(self._to_repo_symbol(str(symbol)) for symbol in symbols)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = (
+            f"SELECT {', '.join(ETF_BASIC_COLUMNS)} FROM etf_basic{where} "
+            "ORDER BY symbol"
+        )
+        with self._connect() as connection:
+            return pd.read_sql_query(sql, connection, params=params)
+
+    def clear_etf_basic(self) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM etf_basic")
+
+    def count_etf_basic(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS c FROM etf_basic"
+            ).fetchone()
+            return int(row["c"] if row else 0)

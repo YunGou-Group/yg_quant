@@ -18,7 +18,7 @@ from Universes.rules import is_restricted_name
 from StrategyEngine.context import DayContext
 from StrategyEngine.holdings import TargetHoldings
 from StrategyEngine.allocators import Allocator, EqualWeight
-from StrategyEngine.strategy import Strategy
+from StrategyEngine.strategy import Strategy, cli_field, n_field
 from Strategies.rebalance_schedule import week_end_asofs
 
 logger = logging.getLogger("Strategies")
@@ -141,6 +141,14 @@ class SmallCapStrategy(Strategy):
             anti_tail=args.anti_tail,
             allocator=allocator,
         )
+
+    @classmethod
+    def cli_fields(cls):
+        return [
+            cli_field("hold", "取到市值第 N 名", "int", default=HOLD_N),
+            cli_field("anti_tail", "防尾声", "bool", default=False),
+            n_field(CANDIDATE_N, label="候选池大小"),
+        ]
 
     @classmethod
     def panel_kwargs(cls, args) -> dict:

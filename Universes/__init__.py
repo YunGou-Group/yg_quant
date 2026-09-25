@@ -8,11 +8,12 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from .base import Universe
-from .catalog import build_mask, get, listing, names
+from .catalog import build_mask, default_benchmark, get, listing, names
 
 __all__ = [
     "Universe",
     "build_mask",
+    "default_benchmark",
     "get",
     "listing",
     "names",

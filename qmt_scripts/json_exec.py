@@ -12,7 +12,7 @@ import os
 import time
 
 # 研究仓 `python -m StrategyEngine --mode live` 写出的 JSON。
-# 拷到 QMT 后改成你本机的绝对路径，例如 r"D:\data\yg_quant\strategy_runs\qmt_orders.json"
+# 拷到 QMT 后改成你本机的绝对路径，例如 r"D:\data\yg_quant\strategy_runs\live\qmt_orders.json"
 ORDER_FILE = r""
 ACCOUNT = ""  # 资金账号；JSON 里有 account 时优先用文件
 START = "091500"
@@ -42,7 +42,7 @@ def execute_on_today(payload, today=None):
 
 
 def target_from_payload(payload):
-    """目标手数。holdings 优先；否则用 orders。volume=0 表示该代码要清到 0。"""
+    """目标手数。holdings 是目标仓；volume=0 表示该代码要清到 0。"""
     target = {}
     if not isinstance(payload, dict):
         return target
@@ -54,17 +54,22 @@ def target_from_payload(payload):
         if volume < 0:
             volume = 0
         target[code] = target.get(code, 0) + volume
-    if target:
-        return target
+    return target
+
+
+def orders_from_payload(payload):
+    """今日应下的单。有 orders 字段（含空列表）就按差额执行，不再用 holdings 重买已持仓。"""
+    if not isinstance(payload, dict) or "orders" not in payload:
+        return None
+    out = []
     for row in payload.get("orders") or []:
         code = str(row.get("code") or "").strip()
         volume = int(row.get("volume") or 0)
         side = str(row.get("side") or "buy").lower()
         if not code or volume <= 0:
             continue
-        signed = volume if side == "buy" else -volume
-        target[code] = target.get(code, 0) + signed
-    return target
+        out.append((code, volume if side == "buy" else -volume))
+    return out
 
 
 def rebalance_deltas(target, current):
@@ -115,8 +120,10 @@ def _send(C, payload):
     current = _positions(account)
     if current is None:
         return False
-    target = target_from_payload(payload)
-    for code, delta in rebalance_deltas(target, current):
+    trades = orders_from_payload(payload)
+    if trades is None:
+        trades = rebalance_deltas(target_from_payload(payload), current)
+    for code, delta in trades:
         if delta > 0:
             passorder(23, 1101, account, code, 12, -1, delta, "json_exec", 2, "json", C)
             print("buy", code, delta)

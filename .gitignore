@@ -24,13 +24,13 @@ env/
 .env.*
 !.env.example
 
-# 本地数据（SQLite / 因子 bin 等）
+# 本地数据
 data/
 *.db
 *.sqlite
 *.sqlite3
 
-# 前端构建产物（frontend/.gitignore 也会挡一层）
+# 前端构建产物
 node_modules/
 
 # IDE / 系统
@@ -43,7 +43,7 @@ desktop.ini
 # 日志
 *.log
 
-# 本地参考 dump（HTML、Next 壳、optimize 草稿等），不进仓
+# 本地工具
 doc/
 scripts/
 tests/

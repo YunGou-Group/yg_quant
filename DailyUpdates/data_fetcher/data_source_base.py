@@ -63,3 +63,10 @@ class DataSourceBase(ABC):
         frame = self.fetch_data(config, start_date, end_date)
         if frame is not None and not frame.empty:
             yield frame
+
+    def fetch_trade_calendar(
+        self, config: Dict, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """开市日，列 trade_date（YYYY-MM-DD）。默认空表，由各数据源覆盖。"""
+        del config, start_date, end_date
+        return pd.DataFrame(columns=["trade_date"])

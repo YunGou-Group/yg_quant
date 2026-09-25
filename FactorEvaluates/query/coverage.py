@@ -206,6 +206,8 @@ CHART_SPECS: Tuple[Dict[str, Any], ...] = (
             "f_style_",
             "f_nlsize",
             "ma_f_",
+            "cum_f_style_",
+            "cum_f_nlsize",
             "attr_style_",
             "attr_nlsize",
             "cum_attr_style_",

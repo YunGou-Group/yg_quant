@@ -48,8 +48,10 @@ class BacktestRequest(BaseModel):
     tail_confidence: float = 0.95
     mu_model: str = "geometric"
     cash: float = 1_000_000.0
-    commission: float = 0.0003
-    stamp: float = 0.0005
+    commission: Optional[float] = None
+    stamp: Optional[float] = None
+    slippage: Optional[float] = None
+    min_commission: Optional[float] = None
     benchmark: Optional[str] = None
     no_benchmark: bool = False
     save: bool = True

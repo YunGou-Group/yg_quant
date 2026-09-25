@@ -89,6 +89,20 @@ def _to_ts_code(code: str) -> str:
     return f"{raw}.SZ"
 
 
+def _etf_ts_code(code: str) -> str:
+    """场内基金代码：50/51/52/56/58 → SH，15/16 → SZ。"""
+    text = str(code).strip().upper()
+    if "." in text:
+        number, market = text.split(".", 1)
+        return f"{number}.{market}"
+    if text.startswith(("SH", "SZ")) and len(text) >= 8:
+        return f"{text[2:]}.{text[:2]}"
+    raw = _em_symbol(text)
+    if raw.startswith(("5", "6")):
+        return f"{raw}.SH"
+    return f"{raw}.SZ"
+
+
 def _si_code(code: str) -> str:
     text = str(code).strip().upper().replace(".SI", "")
     return f"{text}.SI" if text else ""
@@ -213,6 +227,22 @@ class AkshareDataSource(DataSourceBase):
     fetch_slice = FetchSlice.BY_SYMBOL
     requires_token = False
 
+    def fetch_trade_calendar(self, config: Dict, start_date: str, end_date: str) -> pd.DataFrame:
+        del config
+        raw = ak.tool_trade_date_hist_sina()
+        if raw is None or raw.empty:
+            return pd.DataFrame(columns=["trade_date"])
+        work = raw.copy()
+        col = "trade_date" if "trade_date" in work.columns else work.columns[0]
+        work["trade_date"] = pd.to_datetime(work[col], errors="coerce").dt.strftime(
+            "%Y-%m-%d"
+        )
+        work = work.dropna(subset=["trade_date"])
+        lo = pd.Timestamp(str(start_date)).strftime("%Y-%m-%d")
+        hi = pd.Timestamp(str(end_date)).strftime("%Y-%m-%d")
+        days = sorted({d for d in work["trade_date"] if lo <= str(d) <= hi})
+        return pd.DataFrame({"trade_date": days})
+
     def fetch_data(self, config: Dict, start_date: str, end_date: str) -> pd.DataFrame:
         data_type = str(config.get("data_type") or "daily")
         api_name = str(config.get("api_name") or data_type)
@@ -251,6 +281,14 @@ class AkshareDataSource(DataSourceBase):
             if api_name == "index_weight":
                 return self._fetch_index_weight(config, fields, start_date, end_date)
             raise ValueError(f"不支持的指数成分 API: {api_name}")
+        if data_type == "etf":
+            if api_name == "fund_daily":
+                return self._fetch_fund_daily(config, fields, start_date, end_date)
+            raise ValueError(f"不支持的ETF API: {api_name}")
+        if data_type == "etf_info":
+            if api_name == "fund_basic":
+                return self._fetch_fund_basic(config, fields)
+            raise ValueError(f"不支持的ETF信息 API: {api_name}")
         raise ValueError(f"不支持的数据类型: {data_type}")
 
     def _codes(self, config: Dict) -> List[str]:
@@ -843,3 +881,117 @@ class AkshareDataSource(DataSourceBase):
             return pd.DataFrame()
         print("[akshare] index_weight 为中证最新快照，不是逐日历史调样", flush=True)
         return _select(pd.concat(frames, ignore_index=True), fields)
+
+    def _etf_codes(self, config: Dict) -> List[str]:
+        extra = config.get("etf_list") or config.get("symbols") or []
+        if extra:
+            return [_em_symbol(item) for item in extra]
+        raw = ak.fund_etf_spot_em()
+        if raw is None or raw.empty:
+            raise RuntimeError("Akshare 未能获取场内 ETF 列表")
+        col = "代码" if "代码" in raw.columns else raw.columns[0]
+        return (
+            raw[col].astype(str).map(_em_symbol).dropna().unique().tolist()
+        )
+
+    def _fetch_fund_basic(self, config: Dict, fields) -> pd.DataFrame:
+        """Akshare 只有 ETF 现货名单，不含全部 LOF；extra_ts_codes 补固定池缺口。"""
+        from DailyUpdates.storage.etf_schema import ETF_EXTRA_TS_CODES
+
+        raw = ak.fund_etf_spot_em()
+        frames = []
+        if raw is not None and not raw.empty:
+            part = raw.copy()
+            code_col = "代码" if "代码" in part.columns else part.columns[0]
+            name_col = "名称" if "名称" in part.columns else None
+            part["ts_code"] = part[code_col].astype(str).map(_etf_ts_code)
+            part["name"] = part[name_col].astype(str) if name_col else ""
+            part["management"] = ""
+            part["fund_type"] = "ETF"
+            part["market"] = "E"
+            part["status"] = "L"
+            part["list_date"] = ""
+            part["delist_date"] = ""
+            frames.append(part)
+        have = set()
+        if frames:
+            have = set(frames[0]["ts_code"].astype(str).str.upper())
+        extras = [
+            str(code).strip().upper()
+            for code in (config.get("extra_ts_codes") or ETF_EXTRA_TS_CODES)
+            if str(code).strip()
+        ]
+        missing = [code for code in extras if code not in have]
+        if missing:
+            extra = pd.DataFrame(
+                {
+                    "ts_code": missing,
+                    "name": "",
+                    "management": "",
+                    "fund_type": "",
+                    "market": "E",
+                    "status": "L",
+                    "list_date": "",
+                    "delist_date": "",
+                }
+            )
+            frames.append(extra)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        result["ts_code"] = result["ts_code"].astype(str).str.upper()
+        result = result.drop_duplicates(subset=["ts_code"], keep="first")
+        wanted = config.get("etf_list") or config.get("symbols")
+        if wanted:
+            codes = {str(code).strip().upper() for code in wanted if str(code).strip()}
+            result = result.loc[result["ts_code"].isin(codes)].copy()
+        return _select(result, fields)
+
+    def _fetch_fund_daily(
+        self, config: Dict, fields, start: str, end: str
+    ) -> pd.DataFrame:
+        codes = self._etf_codes(config)
+        extra = config.get("extra_ts_codes") or []
+        extra_digits = {_em_symbol(item) for item in extra if str(item).strip()}
+        codes = list(dict.fromkeys(list(codes) + sorted(extra_digits)))
+        frames: List[pd.DataFrame] = []
+        progress = tqdm(codes, desc="Akshare fund_daily", unit="ETF")
+        for symbol in progress:
+            progress.set_postfix_str(symbol)
+            try:
+                raw = _retry_call(
+                    lambda s=symbol: ak.fund_etf_hist_em(
+                        symbol=s,
+                        period="daily",
+                        start_date=start,
+                        end_date=end,
+                        adjust="",
+                    )
+                )
+            except Exception as exc:
+                tqdm.write(f"[akshare] fund_daily {symbol} 失败: {exc}")
+                raw = pd.DataFrame()
+            if raw is None or raw.empty:
+                _pause(config)
+                continue
+            part = raw.rename(columns=_HIST_MAP).copy()
+            if "trade_date" in part.columns:
+                part["trade_date"] = part["trade_date"].map(_yyyymmdd)
+            elif "日期" in part.columns:
+                part["trade_date"] = part["日期"].map(_yyyymmdd)
+            part["ts_code"] = _etf_ts_code(symbol)
+            if "amount" in part.columns:
+                part["amount"] = pd.to_numeric(part["amount"], errors="coerce") / 1000.0
+            if "close" in part.columns and "pre_close" not in part.columns:
+                close = pd.to_numeric(part["close"], errors="coerce")
+                part["pre_close"] = close.shift(1)
+                if "change" not in part.columns:
+                    part["change"] = close - part["pre_close"]
+            frames.append(part)
+            _pause(config)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        if start == end and "trade_date" in result.columns:
+            result = result.loc[result["trade_date"] == start]
+        return _select(result, fields)

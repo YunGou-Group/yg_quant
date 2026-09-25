@@ -15,38 +15,107 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import pandas as pd
 
 from FactorEvaluates.market_panel_loader import HS300_SYMBOL, MarketPanelLoader
-from yg_quant_repo import default_data_dir
+from yg_quant_repo import default_data_dir, strategy_runs_dir
 from Strategies import CANDIDATE_N, HOLD_N
 
 from .allocators import REGISTRY, get_allocator
 from .backtest import Engine, PanelStore, summarize, trades_frame, write_run_snapshot
 from .backtest.report import _aligned_nav
-from Universes.catalog import listing as universe_listing
+from Universes.catalog import (
+    default_benchmark,
+    index_label,
+    listing as universe_listing,
+    resolve_available_benchmark,
+)
 
-from .catalog import by_name
+from .catalog import by_name, fields_of
 
 _LOG = logging.getLogger("StrategyEngine")
 _SAFE_STEM = re.compile(r"^[\w.\-]+$")
 _Echo = Optional[Callable[[str], None]]
 
 WEB_DEFAULT_START = "2023-01-01"
+DEFAULT_COSTS = {
+    "commission": 0.0001,
+    "stamp": 0.0005,
+    "slippage": 0.00258,
+    "min_commission": 5.0,
+}
+STOCK_COSTS = DEFAULT_COSTS
+
+
+def cost_defaults(strategy_name: Optional[str] = None) -> Dict[str, float]:
+    """默认万一佣金、0.00258 滑点、单笔最低 5 元；股票另加卖出印花税。策略可用 cost_kwargs 覆盖。"""
+    out = dict(STOCK_COSTS)
+    spec = by_name().get(str(strategy_name or ""))
+    fn = getattr(spec, "cost_kwargs", None)
+    if not callable(fn):
+        return out
+    raw = fn(None) or {}
+    for key in STOCK_COSTS:
+        if key in raw and raw[key] is not None:
+            out[key] = float(raw[key])
+    return out
+
+
+def apply_cost_defaults(args) -> None:
+    costs = cost_defaults(getattr(args, "strategy", None))
+    for key, value in costs.items():
+        if getattr(args, key, None) is None:
+            setattr(args, key, value)
+
+
+def _index_symbols() -> List[str]:
+    try:
+        return MarketPanelLoader().list_index_symbols()
+    except Exception:
+        return []
+
+
+def _bind_benchmark(universe: str, requested: Optional[str] = None) -> Optional[str]:
+    preferred = (requested or "").strip() or default_benchmark(universe) or HS300_SYMBOL
+    return resolve_available_benchmark(preferred, _index_symbols()) or preferred
 
 
 def catalog_meta() -> Dict[str, Any]:
     names = by_name()
     default = "small_cap" if "small_cap" in names else (sorted(names)[0] if names else None)
+    available = _index_symbols()
+    universes = []
+    for row in universe_listing():
+        item = dict(row)
+        requested = item.get("benchmark") or ""
+        actual = resolve_available_benchmark(requested, available) or requested
+        item["benchmark_requested"] = requested
+        item["benchmark"] = actual
+        item["benchmark_label"] = index_label(actual)
+        universes.append(item)
+    benchmarks = [
+        {"value": code, "label": index_label(code)}
+        for code in available
+    ]
+    default_bench = resolve_available_benchmark(
+        default_benchmark("all"), available
+    ) or HS300_SYMBOL
     return {
         "strategies": [
-            {"name": name, "fields": _strategy_fields(name)} for name in sorted(names)
+            {
+                "name": name,
+                "fields": _strategy_fields(name),
+                "costs": cost_defaults(name),
+            }
+            for name in sorted(names)
         ],
         "allocators": sorted(REGISTRY),
-        "universes": universe_listing(),
+        "universes": universes,
+        "benchmarks": benchmarks,
         "mu_models": ["geometric", "arithmetic", "ema"],
         "defaults": {
             "strategy": default,
             "start": WEB_DEFAULT_START,
             "end": None,
             "universe": "all",
+            "benchmark": default_bench,
             "allocator": "equal",
             "allocator_lookback": 252,
             "max_weight": 1.0,
@@ -57,9 +126,7 @@ def catalog_meta() -> Dict[str, Any]:
             "tail_confidence": 0.95,
             "mu_model": "geometric",
             "cash": 1_000_000.0,
-            "commission": 0.0003,
-            "stamp": 0.0005,
-            "benchmark": HS300_SYMBOL,
+            **DEFAULT_COSTS,
             "hold": HOLD_N,
             "n": None,
             "anti_tail": False,
@@ -71,14 +138,18 @@ def args_from_payload(payload: Mapping[str, Any]) -> SimpleNamespace:
     names = by_name()
     default = "small_cap" if "small_cap" in names else (sorted(names)[0] if names else "topk")
     no_benchmark = _bool(payload.get("no_benchmark"))
-    benchmark = _opt_str(payload.get("benchmark"))
-    if benchmark is None and "benchmark" not in payload:
-        benchmark = HS300_SYMBOL
+    strategy = str(payload.get("strategy") or default)
+    costs = cost_defaults(strategy)
+    universe = _opt_str(payload.get("universe")) or "all"
+    if no_benchmark:
+        benchmark = None
+    else:
+        benchmark = _bind_benchmark(universe, _opt_str(payload.get("benchmark")))
     return SimpleNamespace(
-        strategy=str(payload.get("strategy") or default),
+        strategy=strategy,
         start=_opt_str(payload.get("start")) or "2010-01-01",
         end=_opt_str(payload.get("end")),
-        universe=_opt_str(payload.get("universe")) or "all",
+        universe=universe,
         factor=_opt_str(payload.get("factor")),
         n=_opt_int(payload.get("n")),
         rebalance=_opt_str(payload.get("rebalance")) or "daily",
@@ -107,9 +178,23 @@ def args_from_payload(payload: Mapping[str, Any]) -> SimpleNamespace:
         mu_model=str(payload.get("mu_model") or "geometric"),
         cash=float(payload["cash"] if payload.get("cash") not in (None, "") else 1_000_000.0),
         commission=float(
-            payload["commission"] if payload.get("commission") not in (None, "") else 0.0003
+            payload["commission"]
+            if payload.get("commission") not in (None, "")
+            else costs["commission"]
         ),
-        stamp=float(payload["stamp"] if payload.get("stamp") not in (None, "") else 0.0005),
+        stamp=float(
+            payload["stamp"] if payload.get("stamp") not in (None, "") else costs["stamp"]
+        ),
+        slippage=float(
+            payload["slippage"]
+            if payload.get("slippage") not in (None, "")
+            else costs["slippage"]
+        ),
+        min_commission=float(
+            payload["min_commission"]
+            if payload.get("min_commission") not in (None, "")
+            else costs["min_commission"]
+        ),
         out=_opt_str(payload.get("out")),
         benchmark=benchmark,
         no_benchmark=no_benchmark,
@@ -167,10 +252,12 @@ def run_backtest(
         initial_cash=args.cash,
         commission=args.commission,
         stamp=args.stamp,
+        slippage=getattr(args, "slippage", 0.0),
+        min_commission=getattr(args, "min_commission", 0.0),
     ).run(strategy)
     equity_df = result.equity()
     out = Path(args.out) if args.out else (
-        default_data_dir() / "strategy_runs" / f"{tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        strategy_runs_dir("backtest") / f"{tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
     trades_path = out.with_name(f"{out.stem}_trades.csv")
     snap_path = out.with_suffix(".json")
@@ -181,8 +268,19 @@ def run_backtest(
     bench = None
     symbol = "" if args.no_benchmark else str(args.benchmark or "").strip()
     if symbol and symbol.lower() not in {"none", "off"}:
+        loader = MarketPanelLoader()
         try:
-            bench = MarketPanelLoader().load_index_close(symbol)
+            bench = loader.load_index_close(symbol)
+            if bench is None or getattr(bench, "empty", True):
+                alt = _bind_benchmark(getattr(args, "universe", "all"), symbol)
+                if alt and alt != symbol:
+                    _LOG.warning("基准 %s 无行情，改用 %s", symbol, alt)
+                    bench = loader.load_index_close(alt, reload=True)
+                    symbol = alt
+            if bench is None or getattr(bench, "empty", True):
+                _LOG.warning("基准 %s 无行情，跳过超额", symbol)
+                bench = None
+                symbol = ""
         except Exception:
             _LOG.warning("基准 %s 加载失败，跳过超额", symbol)
             bench = None
@@ -221,13 +319,17 @@ def _has_current_attribution(snap: Path) -> bool:
 
 
 def list_snapshots(limit: int = 40) -> List[Dict[str, Any]]:
-    root = _runs_root()
-    if not root.is_dir():
-        return []
     items = []
-    paths = sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    seen = set()
+    paths = []
+    for root in _snapshot_roots():
+        if root.is_dir():
+            paths.extend(root.glob("*.json"))
+    paths = sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
     cap = max(1, int(limit))
     for path in paths:
+        if path.stem in seen:
+            continue
         if path.stem.endswith("_attribution") or path.stem.endswith("_qmt"):
             continue
         try:
@@ -247,6 +349,7 @@ def list_snapshots(limit: int = 40) -> List[Dict[str, Any]]:
                 "has_attribution": _has_current_attribution(path),
             }
         )
+        seen.add(path.stem)
         if len(items) >= cap:
             break
     return items
@@ -264,65 +367,8 @@ def load_snapshot(stem: str) -> Dict[str, Any]:
 
 
 def _strategy_fields(name: str) -> List[Dict[str, Any]]:
-    if name == "small_cap":
-        return [
-            {"key": "hold", "label": "取到市值第 N 名", "type": "int", "default": HOLD_N},
-            {"key": "anti_tail", "label": "防尾声", "type": "bool", "default": False},
-            {"key": "n", "label": "候选池大小", "type": "int", "default": CANDIDATE_N},
-        ]
-    if name == "topk":
-        return [
-            {"key": "factor", "label": "因子", "type": "str", "required": True},
-            {"key": "n", "label": "持仓数", "type": "int", "default": 50},
-            {
-                "key": "rebalance",
-                "label": "调仓频率",
-                "type": "str",
-                "default": "daily",
-                "placeholder": "daily / weekly / 5",
-            },
-        ]
-    if name == "multifactor":
-        return [
-            {
-                "key": "factor",
-                "label": "因子列表",
-                "type": "str",
-                "required": True,
-                "placeholder": "a,b,-c",
-            },
-            {"key": "n", "label": "持仓数", "type": "int", "default": 50},
-            {
-                "key": "rebalance",
-                "label": "调仓频率",
-                "type": "str",
-                "default": "daily",
-                "placeholder": "daily / weekly / 5",
-            },
-            {"key": "lookback", "label": "OLS回看天数", "type": "int", "default": 60},
-            {"key": "horizon", "label": "OLS持有期", "type": "int", "default": 5},
-        ]
-    if name == "icir":
-        return [
-            {
-                "key": "factor",
-                "label": "因子列表",
-                "type": "str",
-                "required": True,
-                "placeholder": "a,b,-c",
-            },
-            {"key": "n", "label": "持仓数", "type": "int", "default": 50},
-            {
-                "key": "rebalance",
-                "label": "调仓频率",
-                "type": "str",
-                "default": "daily",
-                "placeholder": "daily / weekly / 20",
-            },
-            {"key": "lookback", "label": "ICIR回看天数", "type": "int", "default": 60},
-            {"key": "horizon", "label": "IC持有期", "type": "int", "default": 5},
-        ]
-    return []
+    spec = by_name().get(name)
+    return fields_of(spec) if spec is not None else []
 
 
 def _panel_warmup(spec, args, allocator) -> int:
@@ -361,6 +407,8 @@ def _run_params(args) -> dict:
         "cash": args.cash,
         "commission": args.commission,
         "stamp": args.stamp,
+        "slippage": getattr(args, "slippage", 0.0),
+        "min_commission": getattr(args, "min_commission", 0.0),
         "benchmark": None if args.no_benchmark else args.benchmark,
     }
 
@@ -397,18 +445,24 @@ def _equity_from_csv(data: Mapping[str, Any], json_path: Path) -> Dict[str, Any]
 
 
 def _runs_root() -> Path:
-    return default_data_dir() / "strategy_runs"
+    return strategy_runs_dir("backtest")
+
+
+def _snapshot_roots() -> List[Path]:
+    """新路径 ``strategy_runs/backtest``，并兼容旧的扁平 ``strategy_runs/*.json``。"""
+    return [strategy_runs_dir("backtest"), default_data_dir() / "strategy_runs"]
 
 
 def _snapshot_path(stem: str) -> Path:
     name = str(stem or "").strip()
     if not _SAFE_STEM.fullmatch(name):
         raise FileNotFoundError(name)
-    root = _runs_root().resolve()
-    path = (root / f"{name}.json").resolve()
-    if path.parent != root or not path.is_file():
-        raise FileNotFoundError(name)
-    return path
+    for root in _snapshot_roots():
+        resolved = root.resolve()
+        path = (resolved / f"{name}.json").resolve()
+        if path.parent == resolved and path.is_file():
+            return path
+    raise FileNotFoundError(name)
 
 
 def _say(echo: _Echo, message: str) -> None:

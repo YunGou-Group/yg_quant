@@ -12,7 +12,14 @@ import pandas as pd
 
 from DailyUpdates.data_fetcher.data_source_base import DataSourceBase
 
-_SIDECAR_TYPES = {"industry", "stock_info", "financial", "index_constituent"}
+_SIDECAR_TYPES = {
+    "industry",
+    "stock_info",
+    "financial",
+    "index_constituent",
+    "etf",
+    "etf_info",
+}
 
 
 def daily_bars_unready(dataset_config: Dict, empty_required: list) -> bool:

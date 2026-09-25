@@ -126,7 +126,7 @@ class HaltMarkTests(unittest.TestCase):
             ]
         )
         result = Engine(
-            _px_store(open_px), initial_cash=10_000.0, commission=0.0, stamp=0.0
+            _px_store(open_px), initial_cash=10_000.0, commission=0.0, stamp=0.0, slippage=0.0, min_commission=0.0
         ).run(_HoldOne())
         self.assertGreater(result.weights[1, 0], 0.99)
         self.assertGreater(result.weights[2, 0], 0.99)
@@ -143,7 +143,7 @@ class HaltMarkTests(unittest.TestCase):
             ]
         )
         result = Engine(
-            _px_store(open_px), initial_cash=10_000.0, commission=0.0, stamp=0.0
+            _px_store(open_px), initial_cash=10_000.0, commission=0.0, stamp=0.0, slippage=0.0, min_commission=0.0
         ).run(_HoldOne())
         self.assertGreater(result.weights[1, 0], 0.99)
         self.assertGreater(result.weights[2, 0], 0.99)
@@ -163,10 +163,10 @@ class HaltMarkTests(unittest.TestCase):
         )
         long_px = np.vstack([short_px, [[10.0, 10.0]]])
         short = Engine(
-            _px_store(short_px), initial_cash=10_000.0, commission=0.0, stamp=0.0
+            _px_store(short_px), initial_cash=10_000.0, commission=0.0, stamp=0.0, slippage=0.0, min_commission=0.0
         ).run(_HoldOne())
         long = Engine(
-            _px_store(long_px), initial_cash=10_000.0, commission=0.0, stamp=0.0
+            _px_store(long_px), initial_cash=10_000.0, commission=0.0, stamp=0.0, slippage=0.0, min_commission=0.0
         ).run(_HoldOne())
         n = len(short.dates)
         np.testing.assert_allclose(long.nav[:n], short.nav)
@@ -184,7 +184,7 @@ class HaltMarkTests(unittest.TestCase):
             mask=np.ones((4, 2), dtype=bool),
             delist_on=[dates[2], ""],
         )
-        result = Engine(store, initial_cash=10_000.0, commission=0.0, stamp=0.0).run(
+        result = Engine(store, initial_cash=10_000.0, commission=0.0, stamp=0.0, slippage=0.0, min_commission=0.0).run(
             _HoldOne()
         )
         self.assertGreater(result.weights[1, 0], 0.99)

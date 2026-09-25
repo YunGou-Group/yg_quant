@@ -22,6 +22,11 @@ ensure_repo_root()
 
 from DailyUpdates.data_fetcher.unified_scheduler import UnifiedScheduler
 from DailyUpdates.factor_updates.factor_updater import FactorUpdater
+from DailyUpdates.storage.etf_schema import (
+    ETF_EXTRA_TS_CODES,
+    ETF_TUSHARE_BASIC_FIELDS,
+    ETF_TUSHARE_DAILY_FIELDS,
+)
 from DailyUpdates.storage.financial_schema import DAILY_BASIC_BARRA_FIELDS, FINANCIAL_TUSHARE_FIELDS
 
 
@@ -239,13 +244,47 @@ def main():
             'data_type': 'index',
             'api_name': 'index_daily',
             'token': tushare_token,
-            # 上证指数 / 深证成指 / 创业板指 / 沪深300
-            'index_list': ['000001.SH', '399001.SZ', '399006.SZ', '000300.SH'],
+            # 上证指数 / 深证成指 / 创业板指 / 沪深300 / 中小综指 / 中证A500
+            'index_list': [
+                '000001.SH',
+                '399001.SZ',
+                '399006.SZ',
+                '000300.SH',
+                '399101.SZ',
+                '000510.SH',
+                '000016.SH',
+                '000688.SH',
+                '000852.SH',
+                '000905.SH',
+                '000985.SH',
+            ],
             'fields': [
                 'ts_code', 'trade_date',
                 'open', 'high', 'low', 'close',
                 'pre_close', 'change', 'pct_chg', 'vol', 'amount',
             ],
+            'primary_key': ['ts_code', 'trade_date'],
+        },
+        # 场内基金名单（ETF / LOF），与 stock_basic 隔离
+        'etf_basic': {
+            'data_source': 'Tushare',
+            'data_type': 'etf_info',
+            'api_name': 'fund_basic',
+            'token': tushare_token,
+            'market': 'E',
+            'status': ['L', 'D'],
+            'extra_ts_codes': list(ETF_EXTRA_TS_CODES),
+            'fields': list(ETF_TUSHARE_BASIC_FIELDS),
+            'primary_key': ['ts_code'],
+        },
+        # 场内基金日线，写入 etf_data，不进 market_data
+        'etf_daily': {
+            'data_source': 'Tushare',
+            'data_type': 'etf',
+            'api_name': 'fund_daily',
+            'token': tushare_token,
+            'pause_seconds': 0.12,
+            'fields': list(ETF_TUSHARE_DAILY_FIELDS),
             'primary_key': ['ts_code', 'trade_date'],
         },
         # 申万行业分类：https://tushare.pro/document/2?doc_id=181

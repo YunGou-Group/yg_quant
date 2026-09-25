@@ -10,4 +10,6 @@ fastapi>=0.104.1,<1
 uvicorn>=0.24.0,<1
 pydantic>=2.5,<3
 cvxpy>=1.1.19
+lightgbm>=4.0.0,<5
+scikit-learn>=1.3.0,<2
 pytest>=7.0.0

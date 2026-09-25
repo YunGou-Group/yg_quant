@@ -174,6 +174,7 @@ export function styleKeyOf(raw) {
     .replace(/^ma_beta_/, "")
     .replace(/^beta_/, "")
     .replace(/^ma_f_/, "")
+    .replace(/^cum_f_/, "")
     .replace(/^f_/, "")
     .replace(/^cum_attr_/, "")
     .replace(/^attr_/, "")
@@ -191,7 +192,7 @@ export function orderedStyleKeys(series, prefix) {
   for (const key of Object.keys(series || {})) {
     if (!key.startsWith(prefix)) continue;
     const styleKey = key.slice(prefix.length);
-    if (!styleKey || styleKey.startsWith("ind_")) continue;
+    if (!styleKey || styleKey.startsWith("ind_") || styleKey === "industry") continue;
     found.add(styleKey);
   }
   const ordered = BARRA_STYLE_KEYS.filter((k) => found.has(k));

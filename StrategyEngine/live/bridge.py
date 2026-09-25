@@ -102,46 +102,59 @@ def plan_from_target(
     account: str = "",
     lot_size: int = LOT,
     params: Optional[Dict[str, Any]] = None,
+    current: Optional[Mapping[str, float]] = None,
 ) -> QmtOrderPlan:
     cash = float(capital)
     if cash <= 0:
         raise ValueError("实盘必须指定正的分配资金 --cash")
     lot = max(1, int(lot_size))
+    held = {
+        str(symbol): float(weight)
+        for symbol, weight in (current or {}).items()
+        if float(weight) > 1e-9
+    }
     holdings: List[Dict[str, Any]] = []
     orders: List[QmtOrder] = []
     skipped: List[Dict[str, Any]] = []
-    for symbol, weight in sorted(target.weights.items()):
+    for symbol in sorted(set(target.weights) | set(held)):
         code = to_qmt_code(symbol)
         price = float(prices.get(symbol, np.nan))
-        volume = lots_from_weight(weight, cash, price, lot)
-        if volume <= 0:
+        want_w = float(target.weights.get(symbol, 0.0) or 0.0)
+        have_w = float(held.get(symbol, 0.0) or 0.0)
+        want = lots_from_weight(want_w, cash, price, lot) if want_w > 1e-9 else 0
+        have = lots_from_weight(have_w, cash, price, lot) if have_w > 1e-9 else 0
+        px = float(price) if np.isfinite(price) and price > 0 else None
+        if want_w > 1e-9 and want <= 0:
             skipped.append(
                 {
                     "symbol": symbol,
                     "code": code,
-                    "weight": float(weight),
-                    "price": None if not np.isfinite(price) else float(price),
-                    "reason": "no_price" if not np.isfinite(price) or price <= 0 else "below_lot",
+                    "weight": want_w,
+                    "price": px,
+                    "reason": "no_price" if px is None else "below_lot",
                 }
             )
             continue
-        px = float(price) if np.isfinite(price) else None
-        holdings.append(
-            {
-                "code": code,
-                "symbol": symbol,
-                "volume": volume,
-                "weight": float(weight),
-                "price": px,
-            }
-        )
+        if want > 0:
+            holdings.append(
+                {
+                    "code": code,
+                    "symbol": symbol,
+                    "volume": want,
+                    "weight": want_w,
+                    "price": px,
+                }
+            )
+        delta = want - have
+        if delta == 0:
+            continue
         orders.append(
             QmtOrder(
                 code=code,
-                side="buy",
-                volume=volume,
+                side="buy" if delta > 0 else "sell",
+                volume=abs(int(delta)),
                 symbol=symbol,
-                weight=float(weight),
+                weight=want_w,
                 price=px,
             )
         )
@@ -161,6 +174,6 @@ def plan_from_target(
 
 
 def default_order_path() -> Path:
-    from yg_quant_repo import default_data_dir
+    from yg_quant_repo import strategy_runs_dir
 
-    return default_data_dir() / "strategy_runs" / "qmt_orders.json"
+    return strategy_runs_dir("live") / "qmt_orders.json"

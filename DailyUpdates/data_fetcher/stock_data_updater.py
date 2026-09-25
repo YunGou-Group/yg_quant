@@ -32,6 +32,11 @@ from DailyUpdates.data_fetcher.data_fetcher import DataFetcher, market_uses_rang
 from DailyUpdates.data_fetcher.data_processor import DataProcessor
 from DailyUpdates.data_fetcher.preprocessing.market_bars import load_prev_adj
 from DailyUpdates.data_fetcher.dataset_installer import DatasetInstaller, is_sidecar_dataset
+from DailyUpdates.data_fetcher.trade_calendar import (
+    FORWARD_DAYS,
+    forward_window,
+    refresh_open_calendar,
+)
 from DailyUpdates.storage import SQLiteStorage
 
 
@@ -289,7 +294,10 @@ class StockDataUpdater:
                     f"无交易日历覆盖 {start_iso} ~ {end_iso}，拒绝按自然日探测"
                 )
         # trade_cal 常按新日期在前返回；升序才能沿 (symbol, trade_date) 追加写入。
-        return sorted(days)
+        days = sorted(days)
+        if days:
+            self.storage.upsert_trade_calendar(days)
+        return days
 
     def _missing_trade_days(self, start: str, end: str) -> list:
         """远端已开市、本地日历没有的交易日（中间空洞，不是 latest 之后的增量）。"""
@@ -345,6 +353,21 @@ class StockDataUpdater:
             return False
         return True
 
+    def _calendar_config(self) -> Optional[Dict]:
+        daily = (self.dataset_config or {}).get("daily")
+        if daily:
+            return daily
+        configs = list((self.dataset_config or {}).values())
+        return configs[0] if configs else None
+
+    def refresh_forward_calendar(self, from_date: Optional[str] = None) -> int:
+        """把当前数据源已公布的未来开市日写入本地，供实盘取 T+1。"""
+        cfg = self._calendar_config()
+        if not cfg:
+            return 0
+        start, end = forward_window(from_date, FORWARD_DAYS)
+        return refresh_open_calendar(self.storage, cfg, start, end)
+
     def rebuild_market_data(self, end_date: Optional[str] = None) -> bool:
         end_date = end_date or datetime.date.today().strftime("%Y%m%d")
         days = self._trade_days(self.first_date_str, end_date)
@@ -354,6 +377,10 @@ class StockDataUpdater:
 
     def update_market_data(self, end_date: Optional[str] = None, start_date: Optional[str] = None):
         end_date = end_date or datetime.date.today().strftime("%Y%m%d")
+        try:
+            self.refresh_forward_calendar(from_date=end_date)
+        except Exception:
+            logger.exception("前瞻交易日历刷新失败")
         latest = self.storage.get_latest_market_date()
         if latest is None:
             logger.info("SQLite 数据库为空，将执行完整重建")

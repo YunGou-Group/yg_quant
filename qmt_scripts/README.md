@@ -16,7 +16,9 @@
 python -m StrategyEngine --mode live --strategy small_cap --cash 500000 --account 你的资金账号
 ```
 
-默认写到 `data/strategy_runs/qmt_orders.json`。可用 `--qmt-json` 改路径。
+默认写到 `data/strategy_runs/live/qmt_orders.json`。可用 `--qmt-json` 改路径。
+
+JSON 里 `holdings` 是目标仓（应持有的手数），`orders` 是相对研究仓已成交仓的**当日差额**。已买过、今天只是继续持有的票不会再出现在 `orders` 里。客户端有 `orders` 字段就按下单列表执行（空列表表示今天不用调仓）。
 
 2. 把 `json_exec.py` 复制到 QMT 模型研究，把文件顶部的 `ORDER_FILE` 改成研究仓写出的**绝对路径**（仓库里默认是空字符串），必要时再改 `ACCOUNT`。
 3. 每个交易日 **9:15 前** 启动模型交易。脚本等到 9:15 才 `passorder`（竞价开始前交易所不收单）。

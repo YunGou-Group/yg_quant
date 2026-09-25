@@ -4,6 +4,7 @@
 
 Strategies 只放 score 实现；扫目录、拼 --strategy 是运行时的事。
 只登记 Strategy 子类，且带 name / from_cli / panel_kwargs / run_tag。
+网页参数读 cli_fields，不在 run 里按策略名写死。
 不实例化、不在基类上统一构造参数。
 """
 
@@ -12,13 +13,13 @@ from __future__ import annotations
 import importlib
 import logging
 from pathlib import Path
-from typing import Any, Dict, Type
+from typing import Any, Dict, List, Type
 
 from .strategy import Strategy
 
 logger = logging.getLogger("StrategyEngine")
 
-_SKIP = {"__init__"}
+_SKIP = {"__init__", "rebalance_schedule"}
 
 
 def _strategies_dir() -> Path:
@@ -68,3 +69,12 @@ def discover() -> Dict[str, Type]:
 
 def by_name() -> Dict[str, Type]:
     return discover()
+
+
+def fields_of(spec: Any) -> List[Dict[str, Any]]:
+    """读策略自己声明的网页参数。没有 cli_fields 则空表。"""
+    fn = getattr(spec, "cli_fields", None)
+    if not callable(fn):
+        return []
+    raw = fn() or ()
+    return [dict(item) for item in raw]

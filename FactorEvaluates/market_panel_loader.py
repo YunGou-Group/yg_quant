@@ -23,10 +23,17 @@ def default_adjust() -> str:
 
 
 INDEX_LABELS = {
-    "index_SH000300": "沪深300",
     "index_SH000001": "上证综指",
+    "index_SH000016": "上证50",
+    "index_SH000300": "沪深300",
+    "index_SH000510": "中证A500",
+    "index_SH000688": "科创50",
+    "index_SH000852": "中证1000",
+    "index_SH000905": "中证500",
+    "index_SH000985": "中证全指",
     "index_SZ399001": "深证成指",
     "index_SZ399006": "创业板指",
+    "index_SZ399101": "中小100",
 }
 
 
@@ -89,6 +96,9 @@ class MarketPanelLoader:
         self._field_panels[cache_key] = panel
         return panel
 
+    def list_index_symbols(self) -> list:
+        return self.storage.list_index_symbols()
+
     def load_index_close(
         self, symbol: Optional[str] = None, reload: bool = False
     ) -> pd.Series:
@@ -116,6 +126,53 @@ class MarketPanelLoader:
         self._index_symbol = code
         self._index_close = series.astype("float64")
         return self._index_close
+
+    def load_etf_open(
+        self,
+        reload: bool = False,
+        *,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        return self.load_etf_field(
+            "open",
+            reload=reload,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def load_etf_field(
+        self,
+        field: str,
+        reload: bool = False,
+        *,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """场内基金宽表，走 etf_data，不读 market_data。"""
+        key = str(field)
+        cache_key = f"etf|{key}|{start_date}|{end_date}"
+        if cache_key in self._field_panels and not reload:
+            return self._field_panels[cache_key]
+        data = self.storage.read_etf_data(
+            fields=[key],
+            start_date=start_date,
+            end_date=end_date,
+            ordered=False,
+        )
+        if data.empty or key not in data.columns:
+            panel = pd.DataFrame()
+        else:
+            frame = data.copy()
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
+            frame["ts_code"] = frame["ts_code"].astype(str)
+            panel = (
+                frame.pivot(index="trade_date", columns="ts_code", values=key)
+                .sort_index()
+                .astype("float64")
+            )
+        self._field_panels[cache_key] = panel
+        return panel
 
     @staticmethod
     def summarize_index(

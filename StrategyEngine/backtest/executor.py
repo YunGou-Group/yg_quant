@@ -18,15 +18,19 @@ LOT = 100
 class OpenFillExecutor:
     def __init__(
         self,
-        commission: float = 0.0003,
+        commission: float = 0.0001,
         stamp: float = 0.0005,
         lot_size: int = LOT,
         tick: float = TICK,
+        slippage: float = 0.00258,
+        min_commission: float = 5.0,
     ):
         self.commission = max(0.0, float(commission))
         self.stamp = max(0.0, float(stamp))
         self.lot_size = max(1, int(lot_size))
         self.tick = float(tick)
+        self.slippage = max(0.0, float(slippage))
+        self.min_commission = max(0.0, float(min_commission))
 
     def fill(
         self,
@@ -79,27 +83,54 @@ class OpenFillExecutor:
         limit_up = self._hit_limit(px, up_limit, side="up")
         limit_down = self._hit_limit(px, down_limit, side="down")
         sell, buy, reasons = self._book(intended, overnight, live, limit_up, limit_down)
+        sell_px = self.fill_price(px, sell=True)
+        buy_px = self.fill_price(px, sell=False)
 
-        shares, cash, filled_sell, fee_sell = self._apply_delta(shares, cash, px, sell, sell=True)
+        shares, cash, filled_sell, fee_sell = self._apply_delta(
+            shares, cash, sell_px, sell, sell=True
+        )
         filled += filled_sell
 
         lot = float(self.lot_size)
-        buy_notional = float(np.sum(np.where(np.isfinite(px), buy * px, 0.0)))
-        buy_cost = buy_notional * (1.0 + self.commission)
+        buy_notional = np.where(np.isfinite(buy_px), buy * buy_px, 0.0)
+        buy_fee = self.order_fee(np.abs(buy_notional), sell=False)
+        buy_cost = float(np.sum(buy_notional) + np.sum(buy_fee))
         if buy_cost > cash + 1e-9 and buy_cost > 0:
             scale = max(0.0, cash / buy_cost)
             buy = np.floor(buy * scale / lot) * lot
             starved = (intended > 1e-9) & live & ~limit_up & (buy <= 0) & (reasons == "")
             reasons[starved] = "cash"
-        shares, cash, filled_buy, fee_buy = self._apply_delta(shares, cash, px, buy, sell=False)
+        shares, cash, filled_buy, fee_buy = self._apply_delta(
+            shares, cash, buy_px, buy, sell=False
+        )
         filled += filled_buy
-        traded = float(np.sum(np.abs(np.where(np.isfinite(px), filled * px, 0.0))))
+        fill_px = np.where(filled < 0, sell_px, np.where(filled > 0, buy_px, px))
+        traded = float(np.sum(np.abs(np.where(np.isfinite(fill_px), filled * fill_px, 0.0))))
         report.intended = intended
         report.filled = filled
+        report.price = fill_px
         report.reason = reasons.tolist()
         report.traded_notional = traded
         report.fee = float(fee_sell + fee_buy)
         return shares, cash, report
+
+    def fill_price(self, price: np.ndarray, *, sell: bool) -> np.ndarray:
+        """成交价：买入上浮、卖出下调。盯市仍用未滑点的开盘价。"""
+        px = np.asarray(price, dtype=np.float64)
+        slip = float(self.slippage)
+        if slip <= 0:
+            return px
+        return px * (1.0 - slip) if sell else px * (1.0 + slip)
+
+    def order_fee(self, abs_notional: np.ndarray, *, sell: bool) -> np.ndarray:
+        """按标的计佣金；触及最低佣金时抬到门槛。卖出另加印花税。"""
+        abs_n = np.asarray(abs_notional, dtype=np.float64)
+        fee = abs_n * self.commission
+        if sell:
+            fee = fee + abs_n * self.stamp
+        if self.min_commission > 0:
+            fee = np.where(abs_n > 1e-9, np.maximum(fee, self.min_commission), 0.0)
+        return fee
 
     def _book(self, intended, overnight, live, limit_up, limit_down):
         n = intended.size
@@ -171,10 +202,7 @@ class OpenFillExecutor:
         sell: bool,
     ) -> Tuple[np.ndarray, float, np.ndarray]:
         notional = np.where(np.isfinite(price) & np.isfinite(delta), delta * price, 0.0)
-        abs_n = float(np.sum(np.abs(notional)))
-        fee = abs_n * self.commission
-        if sell:
-            fee += abs_n * self.stamp
+        fee = float(np.sum(self.order_fee(np.abs(notional), sell=sell)))
         shares = shares + delta
         cash = float(cash) - float(np.sum(notional)) - fee
-        return shares, cash, delta.copy(), float(fee)
+        return shares, cash, delta.copy(), fee

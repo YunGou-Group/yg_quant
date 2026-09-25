@@ -9,7 +9,7 @@ import numpy as np
 from StrategyEngine.context import DayContext
 from StrategyEngine.holdings import TargetHoldings
 from StrategyEngine.allocators import Allocator, EqualWeight
-from StrategyEngine.strategy import Strategy
+from StrategyEngine.strategy import Strategy, cli_field, n_field, rebalance_field
 from Strategies.rebalance_schedule import RebalanceGate, RebalanceSpec, parse_rebalance, spec_from_cli
 
 
@@ -23,6 +23,14 @@ class FactorTopK(Strategy):
         n = args.n if args.n is not None else 50
         spec = spec_from_cli(getattr(args, "rebalance", None) or "daily")
         return cls(args.factor, n=n, allocator=allocator, rebalance=spec)
+
+    @classmethod
+    def cli_fields(cls):
+        return [
+            cli_field("factor", "因子", "str", required=True),
+            n_field(50),
+            rebalance_field("daily"),
+        ]
 
     @classmethod
     def panel_kwargs(cls, args) -> dict:

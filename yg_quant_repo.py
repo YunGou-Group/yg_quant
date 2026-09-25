@@ -107,6 +107,13 @@ def default_style_crowding_dir() -> Path:
     return default_data_dir() / "style_crowding"
 
 
+def strategy_runs_dir(kind: str) -> Path:
+    """回测快照与实盘对接 JSON 分目录：``backtest`` / ``live``。"""
+    if kind not in {"backtest", "live"}:
+        raise ValueError(f"strategy_runs kind 必须是 backtest 或 live，收到 {kind!r}")
+    return default_data_dir() / "strategy_runs" / kind
+
+
 def relaunch_as_module(module_name: str) -> None:
     """若当前文件被当成松散脚本启动，则改以 ``python -m module_name`` 再跑一遍。
 

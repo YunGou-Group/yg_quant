@@ -136,6 +136,14 @@ class AttributionMetric(BaseMetric):
             )
             docs.append(
                 FieldDoc(
+                    f"cum_f_{key}",
+                    "风格收益",
+                    f"累计 f {label}",
+                    f"{label}风格收益 f_t 的累计；市场这条腿一共奖/罚了多少，不含本因子暴露",
+                )
+            )
+            docs.append(
+                FieldDoc(
                     f"cum_attr_{key}",
                     "风格归因",
                     f"累计归因 {label}",
@@ -206,7 +214,9 @@ class AttributionMetric(BaseMetric):
             if _leg_from_key(key, "attr_"):
                 produced[f"cum_{key}"] = nan_cumsum(np.asarray(arr, dtype=np.float64))
             if _leg_from_key(key, "f_"):
-                produced[f"ma_{key}"] = rolling_nanmean(np.asarray(arr, dtype=np.float64), window)
+                values = np.asarray(arr, dtype=np.float64)
+                produced[f"ma_{key}"] = rolling_nanmean(values, window)
+                produced[f"cum_{key}"] = nan_cumsum(values)
         return produced
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
@@ -247,6 +257,10 @@ class AttributionMetric(BaseMetric):
             else:
                 series[f"f_{col}"] = f_s
                 series[f"ma_f_{col}"] = rolled
+                series[f"cum_f_{col}"] = pd.Series(
+                    nan_cumsum(f_s.to_numpy(dtype=np.float64)),
+                    index=f_s.index,
+                )
                 series[f"attr_{col}"] = attr
                 series[f"cum_attr_{col}"] = attr.cumsum()
         if attr_parts:
@@ -293,6 +307,7 @@ class AttributionMetric(BaseMetric):
             ma_clean = series[f"ma_f_{col}"].dropna()
             attr_clean = series[f"attr_{col}"].dropna()
             scalars[f"mean_f_{col}"] = float(f_clean.mean()) if len(f_clean) else float("nan")
+            scalars[f"cum_f_{col}"] = float(f_clean.sum()) if len(f_clean) else float("nan")
             scalars[f"ma_last_f_{col}"] = (
                 float(ma_clean.iloc[-1]) if len(ma_clean) else float("nan")
             )
