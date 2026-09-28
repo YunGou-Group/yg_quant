@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """风险暴露引擎：在当前股票池 mask 上组 X_T。
 
-原料是 Bin 里的 9 个 style_* 原始描述子。NLSIZE 不落盘，这里用当天
-z(Size) 的三次项对 Size 残差化得到。申万一级哑变量同样 mask 后现铺，
-丢掉出现最多的一个行业做参照，避免和截距共线。
+原料是 Bin 里的 9 个 style_*。多描述子因子在入库前已按聚宽权重合成；
+这里再按聚宽规则做截面处理：2.5 倍标准差去极值，均值按市值加权、
+标准差用等权标准差。NLSIZE 不落盘，用标准化 Size 的三次项对 Size
+市值加权回归取残差。申万一级哑变量同样 mask 后现铺，丢掉出现最多的
+一个行业做参照，避免和截距共线。
 
-不做收益、不 shift open。截面 z-score / 残差都依赖传入的 mask。
+不做收益、不 shift open。截面处理依赖传入的 mask。
 回归因子前先在当日样本上等权标准化，β 与因子量纲无关。
 """
 
@@ -122,17 +124,51 @@ def _finite_mask(arr: np.ndarray) -> np.ndarray:
     return np.isfinite(arr)
 
 
-def _winsorize_rows(arr: np.ndarray, p: float) -> np.ndarray:
+def _winsorize_sigma_rows(arr: np.ndarray, sigma: float, min_obs: int = 10) -> np.ndarray:
+    """把超出截面等权均值 ± sigma 倍标准差的值收到边界上。"""
     out = arr.copy()
-    valid_n = np.isfinite(out).sum(axis=1)
-    ok = valid_n >= 10
+    finite = np.isfinite(out)
+    count = finite.sum(axis=1)
+    ok = count >= int(min_obs)
     if not ok.any():
         return out
-    lo = np.nanquantile(out[ok], p, axis=1)
-    hi = np.nanquantile(out[ok], 1.0 - p, axis=1)
-    clipped = np.clip(out[ok], lo[:, None], hi[:, None])
-    out[ok] = clipped
+    masked = np.where(finite, out, np.nan)
+    mu = np.full(out.shape[0], np.nan)
+    sd = np.full(out.shape[0], np.nan)
+    mu[ok] = np.nanmean(masked[ok], axis=1)
+    sd[ok] = np.nanstd(masked[ok], axis=1)
+    bounded = np.isfinite(sd) & (sd > 1e-12)
+    use = ok & bounded
+    if not use.any():
+        return out
+    lo = mu - float(sigma) * sd
+    hi = mu + float(sigma) * sd
+    clipped = np.clip(out, lo[:, None], hi[:, None])
+    out[use] = clipped[use]
     return out
+
+
+def _jq_standardize(arr: np.ndarray, weights: np.ndarray, min_obs: int = 10) -> np.ndarray:
+    """聚宽标准化：减去市值加权均值，除以等权标准差。"""
+    finite = np.isfinite(arr)
+    w = np.where(finite & np.isfinite(weights) & (weights > 0), weights, 0.0)
+    sw = w.sum(axis=1, keepdims=True)
+    sw = np.where(sw > 0, sw, np.nan)
+    mu = np.sum(np.where(finite, arr, 0.0) * w, axis=1, keepdims=True) / sw
+    count = finite.sum(axis=1)
+    plain = np.where(finite, arr, np.nan)
+    eq_mu = np.full(arr.shape[0], np.nan)
+    var = np.full(arr.shape[0], np.nan)
+    has = count > 0
+    if has.any():
+        eq_mu[has] = np.nanmean(plain[has], axis=1)
+        centered = plain[has] - eq_mu[has, None]
+        var[has] = np.nanmean(centered ** 2, axis=1)
+    eq_mu = eq_mu[:, None]
+    var = var[:, None]
+    sd = np.sqrt(var)
+    sd = np.where((count >= int(min_obs))[:, None] & np.isfinite(sd) & (sd > 1e-12), sd, np.nan)
+    return (arr - mu) / sd
 
 
 def _row_weights(values: np.ndarray, weights: Optional[np.ndarray]) -> np.ndarray:
@@ -153,16 +189,6 @@ def _zscore_sample(values: np.ndarray) -> Optional[np.ndarray]:
     if not np.isfinite(sd) or sd <= 1e-12:
         return None
     return (values - mu) / sd
-
-
-def _weighted_zscore(arr: np.ndarray, weights: Optional[np.ndarray]) -> np.ndarray:
-    w = _row_weights(arr, weights)
-    mu = np.nansum(np.where(np.isfinite(arr), arr * w, 0.0), axis=1, keepdims=True)
-    centered = np.where(np.isfinite(arr), arr - mu, np.nan)
-    var = np.nansum(np.where(np.isfinite(centered), (centered ** 2) * w, 0.0), axis=1, keepdims=True)
-    sd = np.sqrt(var)
-    sd = np.where(sd > 1e-12, sd, np.nan)
-    return centered / sd
 
 
 def _residualize_on_one(
@@ -231,10 +257,12 @@ class ExposureMatrix:
 
 
 class ExposureEngine:
-    def __init__(self, winsor_p: float = 0.05, min_obs: int = 20):
-        if not 0.0 < float(winsor_p) < 0.5:
-            raise ValueError(f"winsor_p 应在 (0, 0.5)，收到 {winsor_p!r}")
-        self.winsor_p = float(winsor_p)
+    def __init__(self, winsor_sigma: float = 2.5, min_obs: int = 20):
+        if float(winsor_sigma) <= 0:
+            raise ValueError(f"winsor_sigma 应大于 0，收到 {winsor_sigma!r}")
+        self.winsor_sigma = float(winsor_sigma)
+        # ExposureMatrix 沿用该字段保存去极值倍数。
+        self.winsor_p = self.winsor_sigma
         self.min_obs = int(min_obs)
 
     def build(
@@ -271,8 +299,8 @@ class ExposureEngine:
                 continue
             arr = _align(frame, dates, symbols).to_numpy(dtype=np.float64)
             arr = np.where(mask_arr, arr, np.nan)
-            arr = _winsorize_rows(arr, self.winsor_p)
-            z = _weighted_zscore(arr, weight_arr)
+            arr = _winsorize_sigma_rows(arr, self.winsor_sigma, min_obs=self.min_obs)
+            z = _jq_standardize(arr, weight_arr, min_obs=self.min_obs)
             z_panels[name] = pd.DataFrame(z, index=dates, columns=symbols)
             ordered.append(name)
 
@@ -280,7 +308,7 @@ class ExposureEngine:
         cubed = size_z ** 3
         nlsize = _residualize_on_one(cubed, size_z, weight_arr)
         nlsize = np.where(mask_arr, nlsize, np.nan)
-        nlsize = _weighted_zscore(nlsize, weight_arr)
+        nlsize = _jq_standardize(nlsize, weight_arr, min_obs=self.min_obs)
         z_panels[NLSIZE_NAME] = pd.DataFrame(nlsize, index=dates, columns=symbols)
 
         names: list[str] = []

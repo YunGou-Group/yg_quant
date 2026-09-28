@@ -220,7 +220,7 @@ class SQLiteStorage:
                 """
 
     def _ensure_financial_columns(self, connection: sqlite3.Connection) -> None:
-        """给已有 financial_indicator 补 Barra10 数值列（SQLite ADD COLUMN）。"""
+        """给已有 financial_indicator 补数值列（SQLite ADD COLUMN）。"""
         existing = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(financial_indicator)")
@@ -1156,6 +1156,14 @@ class SQLiteStorage:
             row = connection.execute(
                 "SELECT MAX(end_date) AS latest FROM financial_indicator "
                 "WHERE end_date IS NOT NULL AND end_date != ''"
+            ).fetchone()
+            return row["latest"] if row and row["latest"] else None
+
+    def get_financial_latest_ann_date(self) -> Optional[str]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(ann_date) AS latest FROM financial_indicator "
+                "WHERE ann_date IS NOT NULL AND ann_date != ''"
             ).fetchone()
             return row["latest"] if row and row["latest"] else None
 

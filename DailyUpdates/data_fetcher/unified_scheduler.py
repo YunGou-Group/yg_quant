@@ -397,7 +397,8 @@ class UnifiedScheduler:
                 result["execution_log"].append("空库行情重建完成")
                 _install_datasets(schedule_start, end_date)
             else:
-                _install_datasets()
+                # 新字段回填也要把上界接到本次调度日，避免扫到前瞻日历。
+                _install_datasets(None, end_date)
 
             if installs:
                 # INSTALL 已经把维表写入 SQLite；注册表必须马上跟上，

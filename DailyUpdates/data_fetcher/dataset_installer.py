@@ -26,6 +26,40 @@ SIDECAR_DATA_TYPES = {
 }
 _TRUNCATED_BY_DATE_APIS = {"stk_limit", "daily_basic", "adj_factor"}
 
+# 指数行没有这些列。股本还要对有市值的股票比覆盖，不能要求当天所有主键都非空。
+_INDEX_SKIP_FIELDS = frozenset(
+    {
+        "adj_factor",
+        "total_share",
+        "float_share",
+        "pe",
+        "pe_ttm",
+        "pb",
+        "ps",
+        "ps_ttm",
+        "dv_ttm",
+        "turnover_rate",
+        "turnover_rate_f",
+        "total_mv",
+        "circ_mv",
+    }
+)
+_SHARE_FIELDS = frozenset({"total_share", "float_share"})
+
+
+def missing_field_coverage(field: str, existing: Sequence[str]) -> Tuple[str, str]:
+    """缺字段核验的 WHERE 附加条件、HAVING 右侧计数列。"""
+    names = set(existing)
+    extra = ""
+    coverage = "*"
+    if field in _INDEX_SKIP_FIELDS:
+        extra = " AND symbol NOT LIKE 'index_%'"
+        if field == "adj_factor" and "close" in names:
+            extra += " AND close IS NOT NULL"
+        elif field in _SHARE_FIELDS and "total_mv" in names:
+            coverage = "total_mv"
+    return extra, coverage
+
 
 def is_industry_dataset(config: Dict) -> bool:
     return config.get("data_type") == "industry"
@@ -34,6 +68,16 @@ def is_industry_dataset(config: Dict) -> bool:
 def is_sidecar_dataset(config: Dict) -> bool:
     """非行情宽表路径：行业 / 股票基础 / 财务 / 指数成分。"""
     return config.get("data_type") in SIDECAR_DATA_TYPES
+
+
+def clamp_asof(end_date: Optional[str], cal_end: Optional[str] = None) -> str:
+    """回填上界不超过今天。交易日历含前瞻开市日，那些天源里还没有数。"""
+    today = pd.Timestamp.today().normalize()
+    raw = end_date or cal_end
+    stamp = pd.Timestamp(raw) if raw else today
+    if stamp > today:
+        stamp = today
+    return stamp.strftime("%Y%m%d")
 
 
 def always_full_sidecar(config: Dict) -> bool:
@@ -87,7 +131,7 @@ class DatasetInstaller:
 
         cal_start, cal_end = self.storage.get_calendar_range()
         start_date = (start_date or cal_start or "").replace("-", "")
-        end_date = (end_date or cal_end or "").replace("-", "")
+        end_date = clamp_asof(end_date, cal_end)
         if not start_date or not end_date:
             logger.error("数据库中没有交易日历，无法回填新字段")
             return False
@@ -160,7 +204,7 @@ class DatasetInstaller:
         """按交易日历逐日拉取，避免 BY_DATE 源大区间一次返回被截断。"""
         cal_start, cal_end = self.storage.get_calendar_range()
         start = pd.Timestamp(start_date or cal_start).strftime("%Y-%m-%d")
-        end = pd.Timestamp(end_date or cal_end).strftime("%Y-%m-%d")
+        end = pd.Timestamp(clamp_asof(end_date, cal_end)).strftime("%Y-%m-%d")
         value_fields = [
             field
             for field in dataset_config.get("fields") or []
@@ -215,9 +259,10 @@ class DatasetInstaller:
     def _trade_dates_missing_fields(
         self, start: str, end: str, fields: Sequence[str]
     ) -> List[str]:
-        """日历中任一目标字段未覆盖当天全部主键行的日期。
+        """日历中目标字段尚未覆盖应有股票行的日期。
 
-        指数行没有 adj_factor，核验该字段时排除 symbol LIKE 'index_%'。
+        指数行没有 daily_basic / adj_factor。股本只要求和已有总市值的股票对齐，
+        不强求当天每一行都非空。
         """
         with self.storage._connect() as connection:
             calendar = [
@@ -239,17 +284,14 @@ class DatasetInstaller:
                 return calendar
             complete = None
             for field in usable:
-                extra = ""
-                if field == "adj_factor":
-                    extra = " AND symbol NOT LIKE 'index_%'"
-                    if "close" in existing:
-                        extra += " AND close IS NOT NULL"
+                extra, coverage = missing_field_coverage(field, existing)
                 filled = {
                     row["trade_date"]
                     for row in connection.execute(
                         f'SELECT trade_date FROM market_data '
                         f"WHERE trade_date BETWEEN ? AND ?{extra} "
-                        f'GROUP BY trade_date HAVING COUNT("{field}") >= COUNT(*)',
+                        f'GROUP BY trade_date '
+                        f'HAVING COUNT("{field}") >= COUNT({coverage})',
                         (start, end),
                     )
                 }
@@ -301,11 +343,16 @@ class DatasetInstaller:
             "fina_indicator",
             "fina_indicator_vip",
         ):
-            latest = self.storage.get_financial_latest_end_date()
+            latest = self.storage.get_financial_latest_ann_date()
+            if not latest:
+                latest = self.storage.get_financial_latest_end_date()
             if not latest:
                 return "full", None
-            # 含最新报告期，便于公告更正覆盖
-            return "incremental", latest.replace("-", "")
+            # 从最近公告日往前回 3 个自然日，覆盖 T+1 和周末补丁
+            start = (
+                pd.Timestamp(latest) - pd.Timedelta(days=3)
+            ).strftime("%Y%m%d")
+            return "incremental", start
 
         if data_type == "etf" and api_name == "fund_daily":
             latest = self.storage.get_latest_etf_date()
@@ -339,7 +386,7 @@ class DatasetInstaller:
         data_type = dataset_config.get("data_type")
         api_name = dataset_config.get("api_name")
         cal_start, cal_end = self.storage.get_calendar_range()
-        end = (end_date or cal_end or "").replace("-", "")
+        end = clamp_asof(end_date, cal_end)
 
         if data_type == "etf" and api_name == "fund_daily":
             return self._write_etf_daily(
@@ -409,13 +456,18 @@ class DatasetInstaller:
                         f"缺失指数 {missing} 已回填 {written} 行，继续增量 {start}->{end}"
                     )
 
+        fetch_config = dataset_config
+        if write_mode == "incremental" and data_type == "financial":
+            fetch_config = dict(dataset_config)
+            fetch_config["fetch_mode"] = "ann_date"
         logger.info(
             f"{'全量' if write_mode == 'full' else '增量'}更新 sidecar "
             f"{dataset_name}: type={data_type}, api={api_name}, "
             f"range={start}->{end}"
+            f"{' by=ann_date' if fetch_config is not dataset_config else ''}"
         )
         try:
-            data = self.data_fetcher.fetch_dataset(dataset_config, start, end)
+            data = self.data_fetcher.fetch_dataset(fetch_config, start, end)
         except Exception:
             logger.exception(f"数据集 {dataset_name} 拉取失败")
             return False
@@ -450,7 +502,7 @@ class DatasetInstaller:
         del mode
         cal_start, cal_end = self.storage.get_calendar_range()
         start = (start_date or cal_start or "").replace("-", "")
-        end = (end_date or cal_end or "").replace("-", "")
+        end = clamp_asof(end_date, cal_end)
         if not start or not end:
             logger.error("没有交易日历，无法写入 etf_daily")
             return False

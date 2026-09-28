@@ -26,6 +26,27 @@ INDEX_WEIGHT_CODE_ALIAS = {
     "000985.SH": "000985.CSI",
 }
 INDEX_WEIGHT_PROBE_CODES = ("000016.SH", "399300.SZ", "000905.SH")
+# VIP 单页常见顶格；下一页为空且上一页正好落在这里，视为截断。
+TUSHARE_PAGE_CAPS = frozenset({6000, 8000, 10000, 12000})
+
+
+def _tushare_error_text(exc: BaseException) -> str:
+    return str(exc)
+
+
+def _is_non_retryable_tushare_error(exc: BaseException) -> bool:
+    """参数/权限类错误重试没有意义。"""
+    text = _tushare_error_text(exc)
+    return any(
+        token in text
+        for token in ("必填参数", "参数错误", "没有接口访问权限", "权限不足")
+    )
+
+
+def _is_unreleased_period_error(exc: BaseException) -> bool:
+    """未到期报告期用 period 全市场拉取时，Tushare 会改口要求 ts_code。"""
+    text = _tushare_error_text(exc)
+    return "必填参数" in text and "ts_code" in text
 
 
 class TushareDataSource(DataSourceBase):
@@ -483,33 +504,39 @@ class TushareDataSource(DataSourceBase):
     def _fetch_fina_indicator(
         self, config: Dict, fields, start_date: str, end_date: str
     ) -> pd.DataFrame:
-        """财务指标：优先按报告期调用 fina_indicator_vip。"""
+        """财务指标：全量按报告期，日常按公告日。"""
         field_list = self._as_field_list(fields) or list(FINANCIAL_TUSHARE_FIELDS)
         # 与原版缓存一致：保留接口返回顺序中的首次命中，勿 keep=last 覆盖
         if "update_flag" not in field_list:
             field_list = list(field_list) + ["update_flag"]
         use_vip = config.get("use_vip", True)
-        periods = config.get("periods") or self._quarter_periods(start_date, end_date)
+        getter = None
+        if use_vip and hasattr(self.pro, "fina_indicator_vip"):
+            getter = self.pro.fina_indicator_vip
+        if str(config.get("fetch_mode") or "period").lower() == "ann_date":
+            return self._finalize_fina_frame(
+                self._fetch_fina_by_ann_dates(
+                    getter, field_list, start_date, end_date, config
+                )
+            )
+        as_of = min(
+            pd.Timestamp(end_date) if end_date else pd.Timestamp.today(),
+            pd.Timestamp.today(),
+        ).normalize()
+        periods = config.get("periods") or self._quarter_periods(
+            start_date, end_date, as_of=as_of.strftime("%Y-%m-%d")
+        )
         if not periods:
             raise ValueError("fina_indicator 未生成任何报告期，请检查日期范围")
         print(
-            f"[financial] 拉取财务指标 periods={len(periods)} use_vip={use_vip}",
+            f"[financial] 按报告期拉取 periods={len(periods)} use_vip={getter is not None}",
             flush=True,
         )
         frames = []
         progress = tqdm(periods, desc="拉取财务指标", unit="期")
         for period in progress:
             progress.set_postfix_str(str(period))
-            part = pd.DataFrame()
-            if use_vip and hasattr(self.pro, "fina_indicator_vip"):
-                part = self._call_api(
-                    self.pro.fina_indicator_vip, {"period": period}, field_list
-                )
-            if part is None or part.empty:
-                # 降级：按 period 调普通接口（部分权限可用）
-                part = self._call_api(
-                    self.pro.fina_indicator, {"period": period}, field_list
-                )
+            part = self._fetch_fina_period(getter, period, field_list, as_of)
             if part is not None and not part.empty:
                 frames.append(part)
                 tqdm.write(f"[financial] period={period} -> {len(part)} 行")
@@ -518,15 +545,18 @@ class TushareDataSource(DataSourceBase):
             time.sleep(float(config.get("pause_seconds", 1.0)))
         if not frames:
             return pd.DataFrame()
-        result = pd.concat(frames, ignore_index=True)
+        return self._finalize_fina_frame(pd.concat(frames, ignore_index=True))
+
+    @staticmethod
+    def _finalize_fina_frame(result: pd.DataFrame) -> pd.DataFrame:
+        if result is None or result.empty:
+            return pd.DataFrame()
         if "update_flag" not in result.columns:
             result["update_flag"] = ""
         else:
             result["update_flag"] = (
                 result["update_flag"].fillna("").astype(str).replace({"nan": ""})
             )
-        # 仅去掉完全相同主键的重复；同公告日不同 update_flag 都保留（对齐原版缓存可存多行）
-        # keep=first：与原版 to_dict 后按接口顺序首次命中一致，禁止 keep=last 乱盖
         subset = [
             c
             for c in ["ts_code", "end_date", "ann_date", "update_flag"]
@@ -536,6 +566,81 @@ class TushareDataSource(DataSourceBase):
             result = result.drop_duplicates(subset=subset, keep="first")
         print(f"[financial] 财务指标合计 {len(result)} 行", flush=True)
         return result
+
+    def _fetch_fina_by_ann_dates(
+        self,
+        getter: Optional[Callable],
+        field_list: List[str],
+        start_date: str,
+        end_date: str,
+        config: Dict,
+    ) -> pd.DataFrame:
+        """按公告日逐日拉取，覆盖提前/延期披露和更正。"""
+        if getter is None:
+            raise RuntimeError("fina_indicator_vip 不可用，无法按公告日拉全市场")
+        today = pd.Timestamp.today().normalize()
+        start = pd.Timestamp(start_date).normalize()
+        end = min(pd.Timestamp(end_date).normalize(), today)
+        if start > end:
+            return pd.DataFrame()
+        days = pd.date_range(start, end, freq="D")
+        print(
+            f"[financial] 按公告日拉取 days={len(days)} "
+            f"{start.strftime('%Y%m%d')}->{end.strftime('%Y%m%d')}",
+            flush=True,
+        )
+        frames = []
+        progress = tqdm(days, desc="拉取财务公告", unit="日")
+        for day in progress:
+            stamp = day.strftime("%Y%m%d")
+            progress.set_postfix_str(stamp)
+            try:
+                part = self.getTushareInfo(getter, {"ann_date": stamp}, field_list)
+            except Exception as exc:
+                if not _is_unreleased_period_error(exc):
+                    raise
+                tqdm.write(f"[financial] ann_date={stamp} -> 无公告")
+                part = pd.DataFrame()
+            if part is not None and not part.empty:
+                frames.append(part)
+                tqdm.write(f"[financial] ann_date={stamp} -> {len(part)} 行")
+            time.sleep(float(config.get("pause_seconds", 1.0)))
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def _fetch_fina_period(
+        self,
+        getter: Optional[Callable],
+        period: str,
+        field_list: List[str],
+        as_of: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """按报告期翻页拉取。普通接口必须 ts_code，空结果不能降级。"""
+        if getter is None:
+            raise RuntimeError("fina_indicator_vip 不可用，无法按报告期拉全市场")
+        deadline = self._official_publish_date(pd.Timestamp(period))
+        past_deadline = deadline <= as_of
+        try:
+            part = self.getTushareInfo(getter, {"period": period}, field_list)
+        except Exception as exc:
+            if _is_unreleased_period_error(exc):
+                if past_deadline:
+                    raise RuntimeError(
+                        f"period={period} 已过法定披露截止日 {deadline.date()}，"
+                        "但 VIP 仍要求 ts_code，拒绝写成空期"
+                    ) from exc
+                tqdm.write(f"[financial] period={period} -> 披露窗口内尚无全市场截面")
+                return pd.DataFrame()
+            raise
+        if part is None or part.empty:
+            if past_deadline:
+                raise RuntimeError(
+                    f"period={period} 已过法定披露截止日 {deadline.date()}，"
+                    "但 VIP 返回空表，拒绝整表替换掉该期"
+                )
+            return pd.DataFrame()
+        return part
 
     def _fetch_index_weight(
         self, config: Dict, fields, start_date: str, end_date: str
@@ -728,23 +833,170 @@ class TushareDataSource(DataSourceBase):
         )
 
     @staticmethod
-    def _quarter_periods(start_date: str, end_date: str) -> List[str]:
+    def _official_publish_date(period: pd.Timestamp) -> pd.Timestamp:
+        """A 股定期报告法定披露截止日，不是报告期本身。
+
+        年报：次年 4 月 30 日；一季报：当年 4 月 30 日；
+        半年报：当年 8 月 31 日；三季报：当年 10 月 31 日。
+        """
+        stamp = pd.Timestamp(period)
+        month = int(stamp.month)
+        year = int(stamp.year)
+        if month == 3:
+            return pd.Timestamp(year=year, month=4, day=30)
+        if month == 6:
+            return pd.Timestamp(year=year, month=8, day=31)
+        if month == 9:
+            return pd.Timestamp(year=year, month=10, day=31)
+        if month == 12:
+            return pd.Timestamp(year=year + 1, month=4, day=30)
+        raise ValueError(f"不是标准季报/年报期末: {stamp.date()}")
+
+    @staticmethod
+    def _quarter_periods(
+        start_date: str,
+        end_date: str,
+        as_of: Optional[str] = None,
+    ) -> List[str]:
+        """窗口内已结束的报告期。
+
+        及时性看报告期期末是否已过，不把法定截止日当开拉条件。
+        历史窗口下界仍用法定披露日：2005 年起的任务要包含 2004 年报
+        （2005-04-30 才正式发布），不能拿行情 start_date 去比期末。
+        """
         if not start_date or not end_date:
-            # 默认近 5 年季度
             end = pd.Timestamp.today()
             start = end - pd.DateOffset(years=5)
         else:
             start = pd.Timestamp(start_date)
             end = pd.Timestamp(end_date)
+        today = (
+            pd.Timestamp(as_of).normalize()
+            if as_of is not None
+            else pd.Timestamp.today().normalize()
+        )
+        as_of_date = min(end, today)
         periods = []
-        year = int(start.year)
-        while year <= int(end.year):
+        year = int(start.year) - 1
+        last_year = int(as_of_date.year) + 1
+        while year <= last_year:
             for month, day in ((3, 31), (6, 30), (9, 30), (12, 31)):
                 period = pd.Timestamp(year=year, month=month, day=day)
-                if start <= period <= end:
+                published = TushareDataSource._official_publish_date(period)
+                if period <= as_of_date and published >= start:
                     periods.append(period.strftime("%Y%m%d"))
             year += 1
         return periods
+
+    def _fetch_fund_basic(self, config: Dict, fields) -> pd.DataFrame:
+        """场内基金列表：https://tushare.pro/document/2?doc_id=19"""
+        field_list = self._as_field_list(fields) or list(ETF_TUSHARE_BASIC_FIELDS)
+        market = config.get("market") or "E"
+        statuses = config.get("status") or ["L", "D"]
+        if isinstance(statuses, str):
+            statuses = [statuses]
+        frames = []
+        print(f"[etf_info] 拉取 fund_basic market={market} status={statuses}", flush=True)
+        for status in statuses:
+            part = self._call_api(
+                self.pro.fund_basic,
+                {"market": market, "status": status},
+                field_list,
+            )
+            rows = 0 if part is None or part.empty else len(part)
+            print(f"[etf_info] fund_basic status={status} -> {rows} 行", flush=True)
+            if part is None or part.empty:
+                continue
+            part = part.copy()
+            if "status" not in part.columns:
+                part["status"] = status
+            if "market" not in part.columns:
+                part["market"] = market
+            frames.append(part)
+            time.sleep(0.2)
+        result = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(columns=field_list)
+        )
+        if "ts_code" in result.columns and not result.empty:
+            result["ts_code"] = result["ts_code"].astype(str).str.upper()
+            result = result.drop_duplicates(subset=["ts_code"], keep="last")
+        extras = [
+            str(code).strip().upper()
+            for code in (config.get("extra_ts_codes") or ETF_EXTRA_TS_CODES)
+            if str(code).strip()
+        ]
+        have = set(result["ts_code"].astype(str)) if "ts_code" in result.columns else set()
+        missing = [code for code in extras if code not in have]
+        extra_frames = []
+        for code in missing:
+            part = self._call_api(self.pro.fund_basic, {"ts_code": code}, field_list)
+            rows = 0 if part is None or part.empty else len(part)
+            print(f"[etf_info] fund_basic extra {code} -> {rows} 行", flush=True)
+            if part is None or part.empty:
+                extra_frames.append(
+                    pd.DataFrame(
+                        {
+                            "ts_code": [code],
+                            "name": [""],
+                            "management": [""],
+                            "fund_type": [""],
+                            "market": [market],
+                            "status": ["L"],
+                            "list_date": [""],
+                            "delist_date": [""],
+                        }
+                    )
+                )
+            else:
+                extra_frames.append(part)
+            time.sleep(0.2)
+        if extra_frames:
+            result = pd.concat([result, *extra_frames], ignore_index=True)
+            if "ts_code" in result.columns:
+                result["ts_code"] = result["ts_code"].astype(str).str.upper()
+                result = result.drop_duplicates(subset=["ts_code"], keep="first")
+        result = self._filter_fund_codes(result, config)
+        print(f"[etf_info] fund_basic 合计 {len(result)} 行", flush=True)
+        return result
+
+    def _fetch_fund_daily(
+        self, config: Dict, fields, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """场内基金日线：https://tushare.pro/document/2?doc_id=127"""
+        field_list = self._as_field_list(fields) or list(ETF_TUSHARE_DAILY_FIELDS)
+        result = self._fetch_daily_by_day(
+            self.pro.fund_daily, field_list, start_date, end_date, "fund_daily"
+        )
+        return self._filter_fund_codes(result, config)
+
+    @staticmethod
+    def _filter_fund_codes(frame: pd.DataFrame, config: Dict) -> pd.DataFrame:
+        if frame is None or frame.empty or "ts_code" not in frame.columns:
+            return frame
+        wanted = config.get("etf_list") or config.get("symbols")
+        if not wanted:
+            return frame
+        codes = {str(code).strip().upper() for code in wanted if str(code).strip()}
+        out = frame.copy()
+        out["ts_code"] = out["ts_code"].astype(str).str.upper()
+        return out.loc[out["ts_code"].isin(codes)].copy()
+
+    @staticmethod
+    def _ended_quarter_periods(as_of: pd.Timestamp, count: int = 4) -> List[str]:
+        """最近 count 个已结束报告期，增量时回补晚披露和更正。"""
+        as_of_date = pd.Timestamp(as_of).normalize()
+        ended: List[pd.Timestamp] = []
+        year = int(as_of_date.year) - 2
+        while year <= int(as_of_date.year):
+            for month, day in ((3, 31), (6, 30), (9, 30), (12, 31)):
+                period = pd.Timestamp(year=year, month=month, day=day)
+                if period <= as_of_date:
+                    ended.append(period)
+            year += 1
+        ended.sort()
+        return [stamp.strftime("%Y%m%d") for stamp in ended[-int(count) :]]
 
     def _fetch_fund_basic(self, config: Dict, fields) -> pd.DataFrame:
         """场内基金列表：https://tushare.pro/document/2?doc_id=19"""
@@ -867,6 +1119,8 @@ class TushareDataSource(DataSourceBase):
                 return result if result is not None else pd.DataFrame()
             except Exception as exc:
                 last_error = exc
+                if _is_non_retryable_tushare_error(exc):
+                    raise
                 if attempt in (0, 5, 15, 30, 60):
                     print(
                         f"[api] 重试 {attempt + 1}/61 paras={paras} err={exc}",
@@ -889,7 +1143,6 @@ class TushareDataSource(DataSourceBase):
         """
         df = pd.DataFrame()
         last_page_len = 0
-        page_caps = {6000, 8000}
         while True:
             tmp = None
             last_error = None
@@ -903,6 +1156,8 @@ class TushareDataSource(DataSourceBase):
                     break
                 except Exception as exc:
                     last_error = exc
+                    if _is_non_retryable_tushare_error(exc):
+                        raise
                     time.sleep(1)
             if last_error is not None:
                 # 整页始终拿不到：抛错而不是把已取到的部分当完整结果返回
@@ -911,10 +1166,10 @@ class TushareDataSource(DataSourceBase):
                     f"{last_error}"
                 ) from last_error
             if tmp is None or len(tmp) == 0:
-                if last_page_len in page_caps or last_page_len >= 8000:
+                if last_page_len in TUSHARE_PAGE_CAPS:
                     raise RuntimeError(
                         f"Tushare 分页疑似截断: 上一页 {last_page_len} 行"
-                        f"（常见上限 6000/8000）且下一页为空 "
+                        f"（常见上限 {sorted(TUSHARE_PAGE_CAPS)}）且下一页为空 "
                         f"paras={paras} offset={len(df)}"
                     )
                 return df

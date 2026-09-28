@@ -344,7 +344,7 @@ def main():
             ],
             'primary_key': ['ts_code', 'start_date', 'name'],
         },
-        # 财务指标（按季）：Barra10 Growth/Leverage/EY 描述子；PIT 用 ann_date
+        # 财务指标（按季）：风格 + 质量/基础/成长/每股；PIT 用 ann_date
         'fina_indicator': {
             'data_source': 'Tushare',
             'data_type': 'financial',

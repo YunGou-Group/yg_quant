@@ -42,6 +42,7 @@ _EM_FIN_MAP = {
     "eps": ("EPSJB", "BASIC_EPS", "EPSXS"),
     "ocfps": ("OCFPS", "MGJYXJJE"),
     "bps": ("BPS", "MGZB"),
+    "revenue_ps": ("MGYYSR", "TOTAL_REVENUE_PS", "REVENUE_PS"),
     "netprofit_yoy": ("PARENTNETPROFITTZ", "PARENT_NETPROFIT_YOY"),
     "dt_netprofit_yoy": ("KCFJCXSYJLRTZ", "DEDUCTEDPROFIT_YOY"),
     "or_yoy": ("TOTALOPERATEREVETZ", "OPERATE_INCOME_YOY"),
@@ -50,6 +51,30 @@ _EM_FIN_MAP = {
     "debt_to_eqt": ("CQBL", "DEBT_TO_EQT"),
     "assets_to_eqt": ("QYCS", "EQUITY_MULTIPLIER"),
     "longdeb_to_debt": ("LONGDEB_TO_DEBT", "CQFZBL"),
+    "current_ratio": ("LD", "CURRENT_RATIO"),
+    "quick_ratio": ("SD", "QUICK_RATIO"),
+    "cash_ratio": ("XJBL", "CASH_RATIO"),
+    "inv_turn": ("CHZZL", "INV_TURN"),
+    "ar_turn": ("YSZKZZL", "AR_TURN"),
+    "assets_turn": ("TOAZZL", "ASSETS_TURN"),
+    "invturn_days": ("CHZZTS", "INVTURN_DAYS"),
+    "arturn_days": ("YSZKZZTS", "ARTURN_DAYS"),
+    "grossprofit_margin": ("XSMLL", "GROSSPROFIT_MARGIN", "GROSS_MARGIN"),
+    "netprofit_margin": ("XSJLL", "NETPROFIT_MARGIN"),
+    "roic": ("ROIC", "ROIC_YEARLY"),
+    "ebit": ("EBIT",),
+    "ebitda": ("EBITDA",),
+    "cfps": ("CFPS", "MGXJLL"),
+    "capital_rese_ps": ("MGZBGJ", "CAPITAL_RESE_PS"),
+    "surplus_rese_ps": ("MGGJJ", "SURPLUS_RESE_PS"),
+    "undist_profit_ps": ("MGWFPLR", "UNDIST_PROFIT_PS"),
+    "total_revenue_ps": ("MGYYZSR", "TOTAL_REVENUE_PS"),
+    "op_yoy": ("OPERATEPROFIT_YOY", "YYLRTZ"),
+    "ebt_yoy": ("TOTALPROFIT_YOY", "LRZETZ"),
+    "assets_yoy": ("TOTALASSETS_YOY", "ZZCTZ"),
+    "ocf_yoy": ("OCF_YOY", "JYXJLLTZ"),
+    "basic_eps_yoy": ("BASIC_EPS_YOY", "EPSJBTZ"),
+    "tr_yoy": ("TOTAL_REVENUE_YOY", "YYZSRTZ"),
 }
 
 
@@ -198,6 +223,10 @@ def _map_value_em_columns(frame: pd.DataFrame) -> pd.DataFrame:
             rename[col] = "ps_ttm"
         elif "换手" in text:
             rename[col] = "turnover_rate"
+        elif "流通股本" in text:
+            rename[col] = "float_share"
+        elif "总股本" in text:
+            rename[col] = "total_share"
     out = frame.rename(columns=rename).copy()
     date_col = next(
         (
@@ -212,6 +241,8 @@ def _map_value_em_columns(frame: pd.DataFrame) -> pd.DataFrame:
                 "total_mv",
                 "ps_ttm",
                 "turnover_rate",
+                "total_share",
+                "float_share",
             }
             and ("日期" in str(col) or "date" in str(col).lower())
         ),
@@ -460,6 +491,10 @@ class AkshareDataSource(DataSourceBase):
                 "circ_mv": "circ_mv",
                 "turnover": "turnover_rate",
                 "turnover_rate": "turnover_rate",
+                "total_share": "total_share",
+                "float_share": "float_share",
+                "total_shares": "total_share",
+                "float_shares": "float_share",
             }
             part = part.rename(columns={k: v for k, v in rename.items() if k in part.columns})
             for mv_col in ("total_mv", "circ_mv"):
