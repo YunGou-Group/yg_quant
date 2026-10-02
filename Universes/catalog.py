@@ -32,8 +32,8 @@ INDEX_LABELS = {
     "index_SH000688": "科创50",
     "index_SH000852": "中证1000",
     "index_SH000905": "中证500",
-    "index_SH000985": "中证全指",
-    "index_CSI000985": "中证全指",
+    "index_SH000985": "中证全A",
+    "index_CSI000985": "中证全A",
     "index_SZ399001": "深证成指",
     "index_SZ399006": "创业板指",
     "index_SZ399101": "中小100",
@@ -41,8 +41,8 @@ INDEX_LABELS = {
 
 # 理想基准没有日线时，按风格接近程度回退到库里已有的指数。
 BENCHMARK_FALLBACKS = {
-    "index_SH000985": ("index_CSI000985", "index_SH000510", "index_SH000300"),
-    "index_CSI000985": ("index_SH000985", "index_SH000510", "index_SH000300"),
+    "index_SH000985": ("index_CSI000985",),
+    "index_CSI000985": ("index_SH000985",),
     "index_SH000852": ("index_SZ399101", "index_SH000510", "index_SH000300"),
     "index_SH000905": ("index_SH000510", "index_SH000300"),
     "index_SH000016": ("index_SH000300",),
@@ -125,7 +125,10 @@ def resolve_available_benchmark(
     for cand in BENCHMARK_FALLBACKS.get(want, ()):
         if cand in avail:
             return cand
-    for cand in ("index_SH000300", "index_SH000510", "index_SH000001"):
+    # 指定了基准就不要偷偷换成 A500 / 300，缺行情时由加载端空白提示。
+    if want:
+        return want
+    for cand in ("index_SH000985", "index_SH000300", "index_SH000001"):
         if cand in avail:
             return cand
     return next(iter(sorted(avail)), None) if avail else None

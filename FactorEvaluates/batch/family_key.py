@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""因子家族键：alphaNNN → alpha101，style_* → barra，其余取首段前缀。"""
+"""因子家族键：alphaNNN → alpha101，style_* → barra，聚宽因子取族前缀。"""
 
 from __future__ import annotations
 

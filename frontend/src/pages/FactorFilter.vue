@@ -29,6 +29,8 @@ const resultCols = computed(() => {
     rankBy.value,
     "rank_ic_mean",
     "rank_ic_ir",
+    "rank_ic_20_mean",
+    "rank_ic_20_ir",
     "coverage_rate_mean",
     "quantile_spread_mean",
   ];

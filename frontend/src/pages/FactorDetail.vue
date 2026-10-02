@@ -26,6 +26,8 @@ const cards = computed(() => {
   return [
     ["RankIC", s.rank_ic_mean],
     ["RankIC IR", s.rank_ic_ir],
+    ["RankIC_20", s.rank_ic_20_mean],
+    ["RankIC_20 IR", s.rank_ic_20_ir],
     ["Pearson IC", s.ic_mean],
     ["覆盖率", s.coverage_rate_mean],
     ["分层价差", s.quantile_spread_mean],

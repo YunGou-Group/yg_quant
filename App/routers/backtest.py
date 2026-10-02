@@ -29,13 +29,6 @@ class BacktestRequest(BaseModel):
     start: Optional[str] = None
     end: Optional[str] = None
     universe: Optional[str] = "all"
-    factor: Optional[str] = None
-    n: Optional[int] = None
-    rebalance: Optional[str] = None
-    lookback: Optional[int] = None
-    horizon: Optional[int] = None
-    hold: Optional[int] = None
-    anti_tail: bool = False
     allocator: str = "equal"
     allocator_lookback: int = 252
     max_weight: float = 1.0

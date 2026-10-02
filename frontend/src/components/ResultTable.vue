@@ -16,6 +16,9 @@ const columns = [
   { key: "universe", label: "股票池" },
   { key: "icir", label: "ICIR", path: "icir.icir" },
   { key: "ic_mean", label: "RankIC均值", path: "rank_ic.mean" },
+  { key: "rank_ic_20", label: "RankIC_20", path: "rank_ic_20.mean" },
+  { key: "rank_ic_20_ir", label: "RankIC_20 IR", path: "rank_ic_ir_20.icir" },
+  { key: "ic_20", label: "IC_20", path: "ic_20.mean" },
   { key: "pure_ic", label: "纯化IC", path: "pure_ic.mean" },
   { key: "pure_icir", label: "纯化ICIR", path: "pure_ic.icir" },
   { key: "exp_size", label: "|maβ|Size", path: "exposure.ma_abs_style_size" },
@@ -65,7 +68,7 @@ function toggleSort(key) {
 }
 
 function display(row, key) {
-  const numeric = ["icir", "ic_mean", "pure_ic", "pure_icir", "exp_size", "exp_ind", "attr_ind", "attr_resid", "resid_share", "positive", "ma_slow", "trend", "spread", "coverage"];
+  const numeric = ["icir", "ic_mean", "rank_ic_20", "rank_ic_20_ir", "ic_20", "pure_ic", "pure_icir", "exp_size", "exp_ind", "attr_ind", "attr_resid", "resid_share", "positive", "ma_slow", "trend", "spread", "coverage"];
   if (numeric.includes(key)) return fmt(resultValue(row, key));
   return resultValue(row, key) ?? "";
 }

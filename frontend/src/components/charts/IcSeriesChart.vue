@@ -1,7 +1,8 @@
 <script setup>
 import { computed } from "vue";
 import ChartPanel from "./ChartPanel.vue";
-import { asXY, lineTrace } from "./seriesUtils.js";
+import { fmt } from "../../format.js";
+import { asXY, lineTrace, meanOf } from "./seriesUtils.js";
 
 const props = defineProps({ series: { type: Object, default: () => ({}) } });
 
@@ -24,7 +25,10 @@ const traces = computed(() => {
   const wanted = [
     ["rank_ic", "RankIC"],
     ["daily_rank_ic", "RankIC"],
+    ["rank_ic_20", "RankIC_20"],
+    ["daily_rank_ic_20", "RankIC_20"],
     ["ic", "Pearson IC"],
+    ["ic_20", "IC_20"],
     ["daily_ic", "Pearson IC"],
     ["pure_ic", "纯化 RankIC"],
     ["daily_pure_rank_ic", "纯化 RankIC"],
@@ -38,7 +42,9 @@ const traces = computed(() => {
   const out = [];
   for (const [key, label] of wanted) {
     if (seen.has(label)) continue;
-    const trace = lineTrace(s[key], label);
+    const mean = meanOf(s[key]);
+    const named = mean == null ? label : `${label}  ${fmt(mean)}`;
+    const trace = lineTrace(s[key], named);
     if (trace) {
       seen.add(label);
       out.push(trace);

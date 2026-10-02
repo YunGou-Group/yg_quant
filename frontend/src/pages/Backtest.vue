@@ -17,13 +17,6 @@ const form = reactive({
   start: "2023-01-01",
   end: "",
   universe: "all",
-  factor: "",
-  n: null,
-  rebalance: "daily",
-  lookback: 60,
-  horizon: 5,
-  hold: 6,
-  anti_tail: false,
   allocator: "equal",
   allocator_lookback: 252,
   max_weight: 1,
@@ -43,6 +36,7 @@ const form = reactive({
   benchmark: "",
   no_benchmark: false,
 });
+const strategyParams = reactive({});
 const status = ref("选好策略和区间后点击「开始回测」。全市场回测可能要几分钟。");
 const statusError = ref(false);
 const computing = ref(false);
@@ -133,6 +127,23 @@ const traces = computed(() => {
       mode: "lines",
       name: label ? `基准（${label}）` : "基准",
     });
+    const excess = (equity.nav || []).map((nav, i) => {
+      const bench = equity.benchmark[i];
+      if (nav == null || bench == null) return null;
+      const n = Number(nav);
+      const b = Number(bench);
+      if (!Number.isFinite(n) || !Number.isFinite(b) || b === 0) return null;
+      return n / b;
+    });
+    if (excess.some((v) => v != null)) {
+      lines.push({
+        x: equity.dates,
+        y: excess,
+        type: "scatter",
+        mode: "lines",
+        name: label ? `超额（相对${label}）` : "超额",
+      });
+    }
   }
   return lines;
 });
@@ -233,8 +244,11 @@ const groupBarWidth = computed(() => {
   return (row) => `${Math.min(100, Math.max(8, (Math.abs(Number(row.contribution) || 0) / peak) * 100))}%`;
 });
 
-function fieldOf(key) {
-  return strategyFields.value.find((item) => item.key === key);
+function emptyStrategyValue(field) {
+  const typ = field.type || "str";
+  if (typ === "bool") return false;
+  if (typ === "int" || typ === "float") return null;
+  return "";
 }
 
 function applyDefaults(data) {
@@ -258,12 +272,6 @@ function applyDefaults(data) {
   form.l2_gamma = d.l2_gamma ?? 0.1;
   form.tc_rate = d.tc_rate ?? 0.001;
   form.tail_confidence = d.tail_confidence ?? 0.95;
-  form.hold = d.hold ?? 6;
-  form.n = d.n ?? null;
-  form.rebalance = "daily";
-  form.lookback = 60;
-  form.horizon = 5;
-  form.anti_tail = Boolean(d.anti_tail);
   applyStrategyCosts(form.strategy);
   applyStrategyFields(form.strategy);
 }
@@ -281,9 +289,16 @@ function applyStrategyCosts(name) {
 function applyStrategyFields(name) {
   const item = (meta.value?.strategies || []).find((row) => row.name === name);
   const fields = item?.fields || [];
-  if (fields.some((field) => field.key === "n")) form.n = null;
-  const rebalance = fields.find((field) => field.key === "rebalance");
-  if (rebalance?.default != null) form.rebalance = rebalance.default;
+  for (const key of Object.keys(strategyParams)) {
+    delete strategyParams[key];
+  }
+  for (const field of fields) {
+    if (field.default != null && field.default !== "") {
+      strategyParams[field.key] = field.default;
+    } else {
+      strategyParams[field.key] = emptyStrategyValue(field);
+    }
+  }
 }
 
 watch(
@@ -295,6 +310,14 @@ watch(
     }
   },
 );
+
+function coerceStrategyValue(field, raw) {
+  const typ = field.type || "str";
+  if (typ === "bool") return Boolean(raw);
+  if (raw == null || raw === "") return undefined;
+  if (typ === "int" || typ === "float") return Number(raw);
+  return String(raw);
+}
 
 function body() {
   const payload = {
@@ -316,21 +339,13 @@ function body() {
     l2_gamma: Number(form.l2_gamma),
     tc_rate: Number(form.tc_rate),
     tail_confidence: Number(form.tail_confidence),
-    anti_tail: Boolean(form.anti_tail),
     no_benchmark: Boolean(form.no_benchmark),
     benchmark: form.no_benchmark ? null : form.benchmark || null,
   };
-  if (fieldOf("factor")) payload.factor = form.factor || null;
-  if (fieldOf("hold")) payload.hold = form.hold == null || form.hold === "" ? null : Number(form.hold);
-  if (fieldOf("n") && form.n != null && form.n !== "") payload.n = Number(form.n);
-  if (fieldOf("rebalance")) {
-    payload.rebalance = form.rebalance || fieldOf("rebalance")?.default || "daily";
-  }
-  if (fieldOf("lookback") && form.lookback != null && form.lookback !== "") {
-    payload.lookback = Number(form.lookback);
-  }
-  if (fieldOf("horizon") && form.horizon != null && form.horizon !== "") {
-    payload.horizon = Number(form.horizon);
+  for (const field of strategyFields.value) {
+    const value = coerceStrategyValue(field, strategyParams[field.key]);
+    if (value === undefined) continue;
+    payload[field.key] = value;
   }
   if (form.target_return != null && form.target_return !== "") {
     payload.target_return = Number(form.target_return);
@@ -342,9 +357,14 @@ function body() {
 }
 
 async function run() {
-  if (fieldOf("factor") && !String(form.factor || "").trim()) {
+  const missing = strategyFields.value.find((field) => {
+    if (!field.required) return false;
+    const value = strategyParams[field.key];
+    return value == null || String(value).trim() === "";
+  });
+  if (missing) {
     statusError.value = true;
-    status.value = "请填写因子名（icir / lgbm 用逗号分隔，如 a,b,c）。";
+    status.value = `请填写${missing.label}`;
     return;
   }
   const current = ++runToken;
@@ -598,48 +618,40 @@ onMounted(async () => {
           </option>
         </select>
       </label>
-      <label v-if="fieldOf('factor')" class="field">
-        {{ fieldOf("factor")?.label || "因子" }}
-        <input
-          v-model="form.factor"
-          :placeholder="fieldOf('factor')?.placeholder || 'alpha001'"
-        />
-      </label>
-      <label v-if="fieldOf('hold')" class="field">
-        取到第 N 名
-        <input v-model.number="form.hold" type="number" min="1" />
-      </label>
-      <label v-if="fieldOf('n')" class="field">
-        {{ fieldOf("n")?.label || "N" }}
-        <input v-model.number="form.n" type="number" min="1" placeholder="默认" />
-      </label>
-      <label v-if="fieldOf('rebalance')" class="field">
-        {{ fieldOf("rebalance")?.label || "调仓频率" }}
-        <input
-          v-model="form.rebalance"
-          list="rebalance-opts"
-          :placeholder="fieldOf('rebalance')?.placeholder || 'daily / weekly / 5'"
-        />
-        <datalist id="rebalance-opts">
-          <option value="daily">日频</option>
-          <option value="weekly">周频（周五收盘）</option>
-          <option value="5">每 5 个交易日</option>
-          <option value="10">每 10 个交易日</option>
-          <option value="20">每 20 个交易日</option>
-        </datalist>
-      </label>
-      <label v-if="fieldOf('lookback')" class="field">
-        {{ fieldOf("lookback")?.label || "OLS回看天数" }}
-        <input v-model.number="form.lookback" type="number" min="5" placeholder="60" />
-      </label>
-      <label v-if="fieldOf('horizon')" class="field">
-        {{ fieldOf("horizon")?.label || "OLS持有期" }}
-        <input v-model.number="form.horizon" type="number" min="1" placeholder="5" />
-      </label>
-      <label v-if="fieldOf('anti_tail')" class="check">
-        <input v-model="form.anti_tail" type="checkbox" />
-        防尾声
-      </label>
+      <template v-for="field in strategyFields" :key="field.key">
+        <label v-if="field.type === 'bool'" class="check">
+          <input v-model="strategyParams[field.key]" type="checkbox" />
+          {{ field.label }}
+        </label>
+        <label v-else class="field">
+          {{ field.label }}
+          <input
+            v-if="field.key === 'rebalance'"
+            v-model="strategyParams[field.key]"
+            list="rebalance-opts"
+            :placeholder="field.placeholder || ''"
+          />
+          <input
+            v-else-if="field.type === 'int' || field.type === 'float'"
+            v-model.number="strategyParams[field.key]"
+            type="number"
+            :step="field.type === 'float' ? '0.01' : '1'"
+            :placeholder="field.placeholder || (field.default != null ? String(field.default) : '')"
+          />
+          <input
+            v-else
+            v-model="strategyParams[field.key]"
+            :placeholder="field.placeholder || ''"
+          />
+        </label>
+      </template>
+      <datalist id="rebalance-opts">
+        <option value="daily">日频</option>
+        <option value="weekly">周频（周五收盘）</option>
+        <option value="5">每 5 个交易日</option>
+        <option value="10">每 10 个交易日</option>
+        <option value="20">每 20 个交易日</option>
+      </datalist>
     </div>
 
     <details class="more">
@@ -697,7 +709,7 @@ onMounted(async () => {
 
     <ChartPanel
       v-if="traces.length"
-      title="净值（起始=1）"
+      title="净值 / 超额（起始=1）"
       :traces="traces"
       :height="380"
       :layout="{ yaxis: { title: { text: '净值' } } }"

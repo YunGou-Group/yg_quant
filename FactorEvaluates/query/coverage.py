@@ -39,6 +39,8 @@ CHART_SPECS: Tuple[Dict[str, Any], ...] = (
         "keys": (
             "rank_ic",
             "ic",
+            "rank_ic_20",
+            "ic_20",
             "pure_ic",
             "rolling_ic",
             "weighted_ic",
@@ -46,7 +48,18 @@ CHART_SPECS: Tuple[Dict[str, Any], ...] = (
             "nonlinear_ic_ir",
             "mi_ic",
         ),
-        "metrics": ("rank_ic", "ic", "pure_ic", "rolling_ic", "weighted_ic", "nonlinear_ic", "nonlinear_ic_ir", "mi_ic"),
+        "metrics": (
+            "rank_ic",
+            "ic",
+            "rank_ic_20",
+            "ic_20",
+            "pure_ic",
+            "rolling_ic",
+            "weighted_ic",
+            "nonlinear_ic",
+            "nonlinear_ic_ir",
+            "mi_ic",
+        ),
     },
     {
         "id": "ic_hist",

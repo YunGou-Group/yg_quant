@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """策略合同：只返回目标权重。实现放 Strategies/，继承本类并实现 score。
 
-CLI 发现另看 name / from_cli / panel_kwargs / run_tag；网页参数看 cli_fields。
+CLI 发现另看 name / from_cli / panel_kwargs / run_tag / cli_fields。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ def cli_field(
     required: bool = False,
     placeholder: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """网页表单的一项。写在策略的 cli_fields 里，run 会自动发现。"""
+    """策略参数的一项。写在 cli_fields 里，CLI 与网页都会自动发现。"""
     spec: Dict[str, Any] = {"key": str(key), "label": str(label), "type": str(type)}
     if default is not None:
         spec["default"] = default
@@ -53,7 +53,7 @@ class Strategy(ABC):
 
     @classmethod
     def cli_fields(cls) -> List[Dict[str, Any]]:
-        """网页上要展示的参数。默认没有；新策略在本类声明即可，不用改 run。"""
+        """策略自己的参数。默认没有；新策略在本类声明即可，不用改 run / CLI。"""
         return []
 
     @abstractmethod

@@ -81,6 +81,10 @@ const kpis = computed(() => {
       items: [
         { label: `RankIC均值(${data.horizon})`, value: ic.scalars?.mean, title: fieldHint("rank_ic", "mean") },
         { label: "ICIR", value: icirValue(ic, icir), title: fieldHint("icir", "icir") },
+        { label: "RankIC_20均值", value: metrics.rank_ic_20?.scalars?.mean, title: fieldHint("rank_ic_20", "mean") },
+        { label: "RankIC_20 IR", value: metrics.rank_ic_ir_20?.scalars?.icir, title: fieldHint("rank_ic_ir_20", "icir") },
+        { label: "IC_20均值", value: metrics.ic_20?.scalars?.mean, title: fieldHint("ic_20", "mean") },
+        { label: "IC_20 IR", value: metrics.ic_ir_20?.scalars?.icir, title: fieldHint("ic_ir_20", "icir") },
         { label: "纯化IC均值", value: metrics.pure_ic?.scalars?.mean, title: fieldHint("pure_ic", "mean") },
         { label: "纯化ICIR", value: metrics.pure_ic?.scalars?.icir, title: fieldHint("pure_ic", "icir") },
         { label: "分层价差", value: quantile.scalars?.spread, title: fieldHint("quantile", "spread") },
@@ -113,6 +117,7 @@ const kpis = computed(() => {
       title: "时效 / 覆盖",
       items: [
         { label: "RankIC正值比例", value: ic.scalars?.positive_ratio, title: fieldHint("rank_ic", "positive_ratio") },
+        { label: "RankIC_20正值比例", value: metrics.rank_ic_20?.scalars?.positive_ratio, title: fieldHint("rank_ic_20", "positive_ratio") },
         { label: "长短窗一致性", value: trend.scalars?.last ?? trend.scalars?.mean, title: fieldHint("long_short_term_consistency", "last") },
         { label: "覆盖率", value: coverage.scalars?.mean ?? coverage.scalars?.coverage_mean, title: fieldHint("coverage_rate", "mean") },
       ],

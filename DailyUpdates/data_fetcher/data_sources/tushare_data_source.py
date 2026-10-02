@@ -25,6 +25,10 @@ INDEX_WEIGHT_CODE_ALIAS = {
     "000300.SH": "399300.SZ",
     "000985.SH": "000985.CSI",
 }
+# index_daily 同样：000985 在 Tushare 挂 CSI，.SH 日线为空。
+INDEX_DAILY_CODE_ALIAS = {
+    "000985.SH": "000985.CSI",
+}
 INDEX_WEIGHT_PROBE_CODES = ("000016.SH", "399300.SZ", "000905.SH")
 # VIP 单页常见顶格；下一页为空且上一页正好落在这里，视为截断。
 TUSHARE_PAGE_CAPS = frozenset({6000, 8000, 10000, 12000})
@@ -339,6 +343,9 @@ class TushareDataSource(DataSourceBase):
         end = pd.Timestamp(str(end_date))
         parts = []
         for index_code in index_list:
+            request_code = INDEX_DAILY_CODE_ALIAS.get(
+                str(index_code).strip().upper(), index_code
+            )
             year = int(start.year)
             while year <= int(end.year):
                 chunk_start = max(start, pd.Timestamp(year=year, month=1, day=1))
@@ -346,13 +353,16 @@ class TushareDataSource(DataSourceBase):
                 part = self._call_api(
                     getter,
                     {
-                        "ts_code": index_code,
+                        "ts_code": request_code,
                         "start_date": chunk_start.strftime("%Y%m%d"),
                         "end_date": chunk_end.strftime("%Y%m%d"),
                     },
                     field_list,
                 )
                 if part is not None and not part.empty:
+                    if request_code != index_code and "ts_code" in part.columns:
+                        part = part.copy()
+                        part["ts_code"] = index_code
                     parts.append(part)
                 year += 1
         if not parts:

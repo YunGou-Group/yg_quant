@@ -58,13 +58,25 @@ class FactorEvalService:
     def warmup(self) -> None:
         self._ensure_open()
 
+    def _data_end(self) -> Optional[str]:
+        """评估默认终点：行情最后一根 K 线，不是 trade_calendar 里尚未拉数的未来开市日。"""
+        latest = self.market_loader.storage.get_latest_market_date()
+        if not latest:
+            return None
+        latest = str(latest)
+        calendar = self.factor_loader.calendar()
+        if calendar:
+            clipped = next((day for day in reversed(calendar) if day <= latest), None)
+            return clipped or latest
+        return latest
+
     def meta(self) -> Dict[str, Any]:
         calendar = self.factor_loader.calendar()
         return {
             "factors": self.factor_loader.list_factors(),
             "calendar": {
                 "start": calendar[0] if calendar else None,
-                "end": calendar[-1] if calendar else None,
+                "end": self._data_end(),
             },
             "contract": {
                 "asof": ReturnCalculator.ASOF,
@@ -90,6 +102,9 @@ class FactorEvalService:
 
         start = self._date_or_none(request.get("start"))
         end = self._date_or_none(request.get("end"))
+        data_end = self._data_end()
+        if data_end and (end is None or end > data_end):
+            end = data_end
         t0 = time.perf_counter()
         print(f"[eval] 读取因子面板 {factor_name} …", flush=True)
         factor = self._slice_factor(self._load_factor(factor_name), start, end)

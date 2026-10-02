@@ -23,11 +23,10 @@ from yg_quant_repo import strategy_runs_dir
 
 from .backtest import Engine, summarize, trades_frame, write_run_snapshot
 from .allocators import REGISTRY
-from Strategies import HOLD_N
 
 from Universes.catalog import names as universe_names
 
-from .catalog import by_name
+from .catalog import add_cli_arguments, by_name
 from .live import default_order_path, plan_live
 from .run import _bind_benchmark, apply_cost_defaults, build, _run_params
 
@@ -60,36 +59,7 @@ def main() -> None:
         choices=universe_names(),
         help="Universes/ 已注册股票池，asof PIT",
     )
-    parser.add_argument(
-        "--factor",
-        default=None,
-        help="topk：单因子名；equal / icir / lgbm：逗号分隔，如 a,b,-c（前缀 - 取负）",
-    )
-    parser.add_argument(
-        "--n",
-        type=int,
-        default=None,
-        help="持仓数：topk / equal / icir / lgbm，或小市值候选数",
-    )
-    parser.add_argument(
-        "--rebalance",
-        default="daily",
-        help="topk / equal / icir / lgbm 调仓：daily、weekly（周五收盘），或 N 个交易日如 5 / 20 / every20",
-    )
-    parser.add_argument(
-        "--lookback",
-        type=int,
-        default=None,
-        help="icir / lgbm：回看交易日数，默认 60",
-    )
-    parser.add_argument(
-        "--horizon",
-        type=int,
-        default=None,
-        help="icir / lgbm：远期收益持有交易日，默认 5",
-    )
-    parser.add_argument("--hold", type=int, default=HOLD_N, help="小市值：剔除最小后取到第 N 名")
-    parser.add_argument("--anti-tail", action="store_true", help="小市值防尾声")
+    add_cli_arguments(parser, names)
     parser.add_argument(
         "--allocator",
         default="equal",

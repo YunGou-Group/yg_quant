@@ -16,7 +16,6 @@ import pandas as pd
 
 from FactorEvaluates.market_panel_loader import HS300_SYMBOL, MarketPanelLoader
 from yg_quant_repo import default_data_dir, strategy_runs_dir
-from Strategies import CANDIDATE_N, HOLD_N
 
 from .allocators import REGISTRY, get_allocator
 from .backtest import Engine, PanelStore, summarize, trades_frame, write_run_snapshot
@@ -28,7 +27,7 @@ from Universes.catalog import (
     resolve_available_benchmark,
 )
 
-from .catalog import by_name, fields_of
+from .catalog import bind_strategy_fields, by_name, fields_of
 
 _LOG = logging.getLogger("StrategyEngine")
 _SAFE_STEM = re.compile(r"^[\w.\-]+$")
@@ -90,9 +89,14 @@ def catalog_meta() -> Dict[str, Any]:
         item["benchmark"] = actual
         item["benchmark_label"] = index_label(actual)
         universes.append(item)
+    bench_codes = list(available)
+    for row in universes:
+        code = str(row.get("benchmark") or "").strip()
+        if code and code not in bench_codes:
+            bench_codes.append(code)
     benchmarks = [
         {"value": code, "label": index_label(code)}
-        for code in available
+        for code in bench_codes
     ]
     default_bench = resolve_available_benchmark(
         default_benchmark("all"), available
@@ -127,9 +131,6 @@ def catalog_meta() -> Dict[str, Any]:
             "mu_model": "geometric",
             "cash": 1_000_000.0,
             **DEFAULT_COSTS,
-            "hold": HOLD_N,
-            "n": None,
-            "anti_tail": False,
         },
     }
 
@@ -145,18 +146,11 @@ def args_from_payload(payload: Mapping[str, Any]) -> SimpleNamespace:
         benchmark = None
     else:
         benchmark = _bind_benchmark(universe, _opt_str(payload.get("benchmark")))
-    return SimpleNamespace(
+    args = SimpleNamespace(
         strategy=strategy,
         start=_opt_str(payload.get("start")) or "2010-01-01",
         end=_opt_str(payload.get("end")),
         universe=universe,
-        factor=_opt_str(payload.get("factor")),
-        n=_opt_int(payload.get("n")),
-        rebalance=_opt_str(payload.get("rebalance")) or "daily",
-        lookback=_opt_int(payload.get("lookback")),
-        horizon=_opt_int(payload.get("horizon")),
-        hold=_opt_int(payload.get("hold")) if payload.get("hold") not in (None, "") else HOLD_N,
-        anti_tail=_bool(payload.get("anti_tail")),
         allocator=str(payload.get("allocator") or "equal"),
         allocator_lookback=int(payload.get("allocator_lookback") or 252),
         max_weight=float(
@@ -199,6 +193,8 @@ def args_from_payload(payload: Mapping[str, Any]) -> SimpleNamespace:
         benchmark=benchmark,
         no_benchmark=no_benchmark,
     )
+    bind_strategy_fields(args, payload, strategy)
+    return args
 
 
 def build(args):
@@ -383,17 +379,10 @@ def _panel_warmup(spec, args, allocator) -> int:
 
 
 def _run_params(args) -> dict:
-    return {
+    out = {
         "start": args.start,
         "end": args.end,
         "universe": args.universe,
-        "factor": args.factor,
-        "n": args.n,
-        "rebalance": getattr(args, "rebalance", "daily"),
-        "lookback": getattr(args, "lookback", None),
-        "horizon": getattr(args, "horizon", None),
-        "hold": args.hold,
-        "anti_tail": bool(args.anti_tail),
         "allocator_lookback": args.allocator_lookback,
         "max_weight": args.max_weight,
         "risk_free_rate": args.risk_free_rate,
@@ -411,6 +400,11 @@ def _run_params(args) -> dict:
         "min_commission": getattr(args, "min_commission", 0.0),
         "benchmark": None if args.no_benchmark else args.benchmark,
     }
+    spec = by_name().get(str(getattr(args, "strategy", "") or ""))
+    for field in fields_of(spec):
+        key = str(field["key"])
+        out[key] = getattr(args, key, None)
+    return out
 
 
 def _equity_payload(result, benchmark) -> Dict[str, Any]:
@@ -480,12 +474,6 @@ def _opt_str(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _opt_int(value: Any) -> Optional[int]:
-    if value is None or value == "":
-        return None
-    return int(value)
 
 
 def _opt_float(value: Any) -> Optional[float]:

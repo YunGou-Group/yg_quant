@@ -71,6 +71,7 @@ class DailyMatrixEngine:
                 cube=cube,
                 mask=self.store.mask,
                 fwd=self.store.fwd[int(self.store.horizon)],
+                fwd_20=self._fwd_hold(),
                 fwd_decay=self._fwd_decay,
                 decay_horizons=self._decay_h,
                 style=self._style,
@@ -198,6 +199,7 @@ class DailyMatrixEngine:
             "x_names": list(self.store.x_names),
             "decay_horizons": list(self._decay_h),
             "has_decay": "fwd_decay" in panel.items,
+            "has_fwd_20": "fwd_20" in panel.items,
             "has_style": "style" in panel.items,
             "has_xt": "x_t" in panel.items,
             "size_col": self._size_col(),
@@ -218,6 +220,7 @@ class DailyMatrixEngine:
             "x_names": list(self.store.x_names),
             "decay_horizons": list(self._decay_h),
             "has_decay": "fwd_decay" in panel.items,
+            "has_fwd_20": "fwd_20" in panel.items,
             "has_style": "style" in panel.items,
             "has_xt": "x_t" in panel.items,
             "has_labels": has_labels,
@@ -252,6 +255,10 @@ class DailyMatrixEngine:
         pack.add("fwd", ShmArray.create(self.store.fwd[int(self.store.horizon)]))
         # 主进程改挂 shm 视图，丢掉私有副本；worker 只读这份
         keep_fwd = {int(self.store.horizon): pack.items["fwd"].array}
+        hold = self._fwd_hold()
+        if hold is not None and int(self.store.horizon) != 20:
+            pack.add("fwd_20", ShmArray.create(hold))
+            keep_fwd[20] = pack.items["fwd_20"].array
         if self._fwd_decay is not None:
             pack.add("fwd_decay", ShmArray.create(self._fwd_decay))
             self._fwd_decay = pack.items["fwd_decay"].array
@@ -313,8 +320,9 @@ class DailyMatrixEngine:
         from ..metrics.extra_ic_metrics import lag_fwd_stack
 
         h = int(self.store.horizon)
-        if h in self.store.fwd:
-            self.store.fwd = {h: self.store.fwd[h]}
+        keep = {k: v for k, v in self.store.fwd.items() if k in {h, 20}}
+        if keep:
+            self.store.fwd = keep
         if not any(m.get_name() == "ic_decay" for m in self.metrics):
             return None, ()
         main = self.store.fwd.get(h)
@@ -322,6 +330,13 @@ class DailyMatrixEngine:
             return None, ()
         lags = tuple(int(n) for n in DECAY_HORIZONS)
         return lag_fwd_stack(main, lags), lags
+
+    def _fwd_hold(self) -> Optional[np.ndarray]:
+        if 20 in self.store.fwd:
+            return self.store.fwd[20]
+        if int(self.store.horizon) == 20:
+            return self.store.fwd.get(20) or self.store.fwd.get(int(self.store.horizon))
+        return None
 
     def _size_col(self) -> int:
         try:

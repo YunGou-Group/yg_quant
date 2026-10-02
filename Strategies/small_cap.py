@@ -135,10 +135,11 @@ class SmallCapStrategy(Strategy):
 
     @classmethod
     def from_cli(cls, args, allocator):
+        hold = getattr(args, "hold", None)
         return cls(
-            candidate_n=args.n if args.n is not None else CANDIDATE_N,
-            hold_n=args.hold,
-            anti_tail=args.anti_tail,
+            candidate_n=args.n if getattr(args, "n", None) is not None else CANDIDATE_N,
+            hold_n=HOLD_N if hold is None else hold,
+            anti_tail=bool(getattr(args, "anti_tail", False)),
             allocator=allocator,
         )
 

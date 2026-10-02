@@ -21,6 +21,7 @@ class EvalContext:
     label: str
     asof: str = ReturnCalculator.ASOF
     intermediates: Dict[str, Any] = field(default_factory=dict)
+    calculator: Optional[ReturnCalculator] = None
 
     @classmethod
     def build(
@@ -46,6 +47,7 @@ class EvalContext:
             horizon=n,
             label=ReturnCalculator.label(n),
             asof=ReturnCalculator.ASOF,
+            calculator=engine,
         )
 
     def masked_factor(self) -> pd.DataFrame:
@@ -57,6 +59,21 @@ class EvalContext:
         if self.universe_mask is None:
             return self.fwd_ret
         return self.fwd_ret.where(self.universe_mask)
+
+    def fwd_ret_for(self, horizon: int) -> pd.DataFrame:
+        """任意持有期远期收益；主 horizon 用已对齐面板，其它持有期现算。"""
+        n = int(horizon)
+        if n < 1:
+            raise ValueError(f"horizon 必须为正整数，收到 {horizon!r}")
+        if n == int(self.horizon):
+            return self.masked_fwd_ret()
+        if self.calculator is None:
+            raise ValueError("没有 ReturnCalculator，算不了其它持有期收益")
+        raw = self.calculator.get(n)
+        _factor, aligned, mask = self._align(self.factor, raw, self.universe_mask)
+        if mask is None:
+            return aligned
+        return aligned.where(mask)
 
     @staticmethod
     def _as_date_index(frame: pd.DataFrame) -> pd.DataFrame:

@@ -105,6 +105,18 @@ def _added_market_index_codes(old_config: Dict, new_config: Dict) -> List[str]:
     ]
 
 
+def _missing_market_index_codes(storage, config: Dict) -> List[str]:
+    """配置里有、行情表还没有的指数。名单没变但上次拉空时，也要全量回填。"""
+    if str(config.get("data_type") or "") != "index":
+        return []
+    present = set(storage.list_index_symbols())
+    return [
+        str(code)
+        for code in (config.get("index_list") or [])
+        if _index_symbol(code) not in present
+    ]
+
+
 class UnifiedScheduler:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = Path(db_path or default_db_path()).expanduser().resolve()
@@ -174,7 +186,12 @@ class UnifiedScheduler:
             current_fields = _business_fields(config)
             old_fields = _business_fields(previous[name])
             new_fields = current_fields - old_fields
-            added_indexes = _added_market_index_codes(previous[name], config)
+            added_indexes = list(
+                dict.fromkeys(
+                    _added_market_index_codes(previous[name], config)
+                    + _missing_market_index_codes(self.storage, config)
+                )
+            )
             if not new_fields and not added_indexes:
                 continue
 

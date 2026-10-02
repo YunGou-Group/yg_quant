@@ -17,10 +17,10 @@ $env:AKSHARE_LIVE=1; python -m pytest tests/test_akshare_live.py -q
 | 想加 | 放哪里 |
 |------|--------|
 | 数据源 | `DailyUpdates/data_fetcher/data_sources/`，继承 `DataSourceBase`，声明 `fetch_slice` |
-| 因子 | `DailyUpdates/factor_updates/factors/`，继承 `BaseFactor` |
+| 因子 | `DailyUpdates/factor_updates/factors/`，继承 `BaseFactor`；合成因子写 `factor_dependencies` |
 | 评估指标 | `FactorEvaluates/metrics/`，继承 `BaseMetric` |
 | 股票池 | `Universes/`，继承 `Universe` |
-| 策略 | `Strategies/`，继承 `StrategyEngine.strategy.Strategy` |
+| 策略 | `Strategies/`，继承 `StrategyEngine.strategy.Strategy`，参数写 `cli_fields` |
 | 仓位分配 | `StrategyEngine/allocators/`，并在 `REGISTRY` 登记 |
 | 业绩归因 | `StrategyEngine/attribution/`（`run_attribution` 合同保持不变） |
 

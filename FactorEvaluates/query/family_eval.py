@@ -33,7 +33,9 @@ _UNSIGNED_PREFIXES = (
 )
 _SIGNED_PREFIXES = (
     "rank_ic",
+    "rank_ic_20",
     "ic",
+    "ic_20",
     "nonlinear_ic",
     "mi_ic",
     "pure_ic",
@@ -52,7 +54,9 @@ _SHORT_LEGS = {
 }
 _WINDOW_METRICS = (
     "rank_ic",
+    "rank_ic_20",
     "ic",
+    "ic_20",
     "coverage_rate",
     "quantile_spread",
     "long_short_term_consistency",

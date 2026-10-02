@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""滚动 LightGBM 合成 + Top N。
+"""滚动 LightGBM 排序合成 + Top N。
 
 用法：--strategy lgbm --factor a,b,c
 因子名前加 '-' 表示取负。
 
 每个调仓日：
-1. 回看 lookback 个已实现持有期，用当日截面 z(因子) 预测已实现远期收益
-   （收益先在当日截面去均值，只学相对排序）
-2. 用拟合模型对 asof 截面打分，再选 Top N
+1. 回看 lookback，按约 horizon/4 日抽样已实现截面，减轻 20 日收益重叠
+2. 标签是截面收益五档相关度（0–4），用 LambdaRank 学排序，不是个股收益 MSE
+3. 预测分截面 z 后与等权 z 按 blend 混合，再与上期分数平滑，压换手
 
-远期收益 r_t = close[t+horizon]/close[t] - 1，只用 asof 及之前已实现的收益。
-样本不足或未安装 lightgbm 时回退等权 z-score。
+只用 asof 及之前已实现的 t→t+H 收益。样本不足或未安装 lightgbm 时回退等权 z-score。
+默认 lookback=252、horizon=20。
 """
 
 from __future__ import annotations
@@ -26,8 +26,6 @@ from StrategyEngine.context import DayContext
 from StrategyEngine.holdings import TargetHoldings
 from StrategyEngine.strategy import Strategy, cli_field, n_field, rebalance_field
 from Strategies._factor_combo import (
-    DEFAULT_HORIZON,
-    DEFAULT_LOOKBACK,
     FactorLeg,
     cross_section_z,
     equal_weight_scores,
@@ -38,17 +36,26 @@ from Strategies.rebalance_schedule import RebalanceGate, RebalanceSpec, parse_re
 logger = logging.getLogger("Strategies.lgbm")
 
 DEFAULT_N = 50
+DEFAULT_LOOKBACK = 252
+DEFAULT_HORIZON = 20
 DEFAULT_MIN_ROWS = 400
-DEFAULT_MAX_ROWS = 120_000
+DEFAULT_BLEND = 0.45
+DEFAULT_SMOOTH = 0.40
+MAX_GROUP = 512
+MAX_GROUPS = 80
+MIN_GROUPS = 12
+N_GRADES = 5
 
-_LGB_PARAMS = {
-    "n_estimators": 80,
+_LGB_RANK_PARAMS = {
+    "n_estimators": 60,
     "learning_rate": 0.05,
     "num_leaves": 8,
-    "min_child_samples": 200,
+    "min_child_samples": 40,
     "subsample": 0.8,
-    "colsample_bytree": 1.0,
-    "reg_lambda": 1.0,
+    "subsample_freq": 1,
+    "colsample_bytree": 0.7,
+    "reg_lambda": 2.0,
+    "lambdarank_truncation_level": 50,
     "random_state": 42,
     "n_jobs": 1,
     "verbosity": -1,
@@ -63,6 +70,45 @@ def _try_lightgbm():
     return lgb
 
 
+def _day_stride(horizon: int) -> int:
+    return max(1, int(horizon) // 4)
+
+
+def _relevance_from_returns(y: np.ndarray, n_grades: int = N_GRADES) -> np.ndarray:
+    """截面收益分档：0 最差，n_grades-1 最好。LambdaRank 默认 label_gain 只有 31 档，不能用 1..n 名次。"""
+    y = np.asarray(y, dtype=np.float64)
+    n = int(y.shape[0])
+    if n == 0:
+        return np.empty(0, dtype=np.int32)
+    order = np.argsort(y, kind="mergesort")
+    ranks = np.empty(n, dtype=np.float64)
+    ranks[order] = np.arange(n, dtype=np.float64)
+    grades = np.floor(ranks * int(n_grades) / n).astype(np.int32)
+    return np.clip(grades, 0, int(n_grades) - 1)
+
+
+def _cap_group(
+    x: np.ndarray, y: np.ndarray, max_n: int, rng: np.random.Generator
+) -> Tuple[np.ndarray, np.ndarray]:
+    n = int(y.shape[0])
+    grades = _relevance_from_returns(y)
+    if n <= max_n:
+        return x, grades
+    top = np.where(grades == N_GRADES - 1)[0]
+    bot = np.where(grades == 0)[0]
+    keep = np.unique(np.concatenate([top, bot]))
+    if int(keep.size) > max_n:
+        keep = rng.choice(keep, size=int(max_n), replace=False)
+    else:
+        rest = np.setdiff1d(np.arange(n), keep, assume_unique=False)
+        need = int(max_n) - int(keep.size)
+        if need > 0 and rest.size > 0:
+            pick = rng.choice(rest, size=min(need, int(rest.size)), replace=False)
+            keep = np.concatenate([keep, pick])
+    keep.sort()
+    return x[keep], grades[keep]
+
+
 def stack_realized_xy(
     factor_hist: Sequence[np.ndarray],
     signs: Sequence[float],
@@ -71,13 +117,21 @@ def stack_realized_xy(
     *,
     lookback: int,
     horizon: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """拼已实现样本。X 只用到 index lookback-1，不含 asof 所在的最后 horizon 行。"""
+    stride: Optional[int] = None,
+    group_cap: int = MAX_GROUP,
+    seed: int = 42,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """拼已实现样本。从最近已实现日往回按 stride 抽样；y 是组内收益五档（0–4）。"""
     close = np.asarray(close_hist, dtype=np.float64)
     mask = np.asarray(mask_hist, dtype=bool)
+    step = int(stride) if stride is not None else _day_stride(horizon)
+    rng = np.random.default_rng(int(seed) % (2**31))
     xs: List[np.ndarray] = []
     ys: List[np.ndarray] = []
-    for i in range(int(lookback)):
+    groups: List[int] = []
+    last = int(lookback) - 1
+    i = last
+    while i >= 0:
         j = i + int(horizon)
         c0 = close[i]
         c1 = close[j]
@@ -92,23 +146,48 @@ def stack_realized_xy(
         x = np.column_stack(cols)
         row_ok = uni & np.isfinite(y) & np.all(np.isfinite(x), axis=1)
         if int(row_ok.sum()) < 8:
+            i -= step
             continue
-        yy = y[row_ok]
-        yy = yy - float(np.mean(yy))
-        xs.append(x[row_ok])
+        xx, yy = _cap_group(x[row_ok], y[row_ok], int(group_cap), rng)
+        xs.append(xx)
         ys.append(yy)
+        groups.append(int(yy.shape[0]))
+        i -= step
     if not xs:
-        return np.empty((0, len(factor_hist)), dtype=np.float64), np.empty(0, dtype=np.float64)
-    return np.vstack(xs), np.concatenate(ys)
+        n_f = len(factor_hist)
+        return (
+            np.empty((0, n_f), dtype=np.float64),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+        )
+    # 近端截面放前面，只留最近 MAX_GROUPS 组
+    if len(xs) > MAX_GROUPS:
+        xs = xs[:MAX_GROUPS]
+        ys = ys[:MAX_GROUPS]
+        groups = groups[:MAX_GROUPS]
+    return np.vstack(xs), np.concatenate(ys), np.asarray(groups, dtype=np.int32)
 
 
-def _subsample(x: np.ndarray, y: np.ndarray, max_rows: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
-    n = int(x.shape[0])
-    if n <= max_rows:
-        return x, y
-    rng = np.random.default_rng(int(seed) % (2**31))
-    pick = rng.choice(n, size=int(max_rows), replace=False)
-    return x[pick], y[pick]
+def _label_gain(n_grades: int) -> list:
+    return [float((1 << i) - 1) for i in range(max(1, int(n_grades)))]
+
+
+def _fit_ranker(lgb, x: np.ndarray, y: np.ndarray, groups: np.ndarray):
+    y = np.asarray(y, dtype=np.int32)
+    n_grades = int(y.max()) + 1 if y.size else N_GRADES
+    n_grades = max(n_grades, N_GRADES)
+    params = dict(_LGB_RANK_PARAMS)
+    params["label_gain"] = _label_gain(n_grades)
+    try:
+        model = lgb.LGBMRanker(objective="lambdarank", **params)
+        model.fit(x, y, group=groups)
+        return model
+    except TypeError:
+        params.pop("lambdarank_truncation_level", None)
+        params.pop("label_gain", None)
+        model = lgb.LGBMRanker(**params)
+        model.fit(x, y, group=groups)
+        return model
 
 
 def combine_scores_lgbm(
@@ -120,54 +199,62 @@ def combine_scores_lgbm(
     lookback: int,
     horizon: int,
     min_rows: int = DEFAULT_MIN_ROWS,
+    blend: float = DEFAULT_BLEND,
 ) -> Tuple[np.ndarray, Optional[object]]:
-    """用已实现窗口训练 LightGBM，对末日截面打分。失败则等权回退。"""
+    """LambdaRank 拟合后与等权 z 混合。失败则等权回退。"""
     need = int(lookback) + int(horizon)
     today_uni = np.asarray(mask_hist[-1], dtype=bool)
     today_panels = [np.asarray(p)[-1] for p in factor_hist]
+    eq = equal_weight_scores(today_panels, signs, today_uni)
     if not factor_hist:
-        return np.full(close_hist.shape[1], np.nan, dtype=np.float64), None
+        return eq, None
     for panel in factor_hist:
         if np.asarray(panel).shape[0] < need:
-            return equal_weight_scores(today_panels, signs, today_uni), None
+            return eq, None
 
     lgb = _try_lightgbm()
     if lgb is None:
         logger.warning("未安装 lightgbm，lgbm 策略回退等权 z-score")
-        return equal_weight_scores(today_panels, signs, today_uni), None
+        return eq, None
 
-    x, y = stack_realized_xy(
+    x, y, groups = stack_realized_xy(
         factor_hist,
         signs,
         close_hist,
         mask_hist,
         lookback=lookback,
         horizon=horizon,
+        seed=42 + int(lookback) + int(horizon),
     )
     need_rows = max(int(min_rows), 80 * len(factor_hist))
-    if x.shape[0] < need_rows:
-        return equal_weight_scores(today_panels, signs, today_uni), None
-    x, y = _subsample(x, y, DEFAULT_MAX_ROWS, seed=42 + int(lookback) + int(horizon))
+    if groups.size < MIN_GROUPS or x.shape[0] < need_rows:
+        return eq, None
 
-    model = lgb.LGBMRegressor(**_LGB_PARAMS)
     try:
-        model.fit(x, y)
+        model = _fit_ranker(lgb, x, y, groups)
     except Exception:
-        logger.exception("LightGBM 拟合失败，回退等权")
-        return equal_weight_scores(today_panels, signs, today_uni), None
+        logger.exception("LightGBM 排序拟合失败，回退等权")
+        return eq, None
 
     z_cols = []
     for panel, sign in zip(today_panels, signs):
         raw = np.asarray(panel, dtype=np.float64) * float(sign)
         z_cols.append(cross_section_z(raw, today_uni))
     z = np.column_stack(z_cols)
-    score = np.full(today_uni.shape, np.nan, dtype=np.float64)
+    tree = np.full(today_uni.shape, np.nan, dtype=np.float64)
     ok = today_uni & np.all(np.isfinite(z), axis=1)
     if int(ok.sum()) == 0:
-        return equal_weight_scores(today_panels, signs, today_uni), None
+        return eq, None
     pred = np.asarray(model.predict(z[ok]), dtype=np.float64)
-    score[ok] = pred
-    return score, model
+    tree[ok] = pred
+    tz = cross_section_z(tree, ok)
+    b = float(np.clip(blend, 0.0, 1.0))
+    both = np.isfinite(tz) & np.isfinite(eq)
+    out = eq.copy()
+    out[both] = (1.0 - b) * eq[both] + b * tz[both]
+    only_tree = np.isfinite(tz) & ~np.isfinite(eq)
+    out[only_tree] = tz[only_tree]
+    return out, model
 
 
 class LgbmWeightedTopK(Strategy):
@@ -185,10 +272,18 @@ class LgbmWeightedTopK(Strategy):
         spec = spec_from_cli(getattr(args, "rebalance", None) or "20")
         lookback = int(getattr(args, "lookback", None) or DEFAULT_LOOKBACK)
         horizon = int(getattr(args, "horizon", None) or DEFAULT_HORIZON)
-        if lookback < 20:
-            raise SystemExit("lgbm --lookback 至少为 20")
+        blend = float(getattr(args, "blend", None) if getattr(args, "blend", None) is not None else DEFAULT_BLEND)
+        smooth = float(
+            getattr(args, "smooth", None) if getattr(args, "smooth", None) is not None else DEFAULT_SMOOTH
+        )
+        if lookback < 60:
+            raise SystemExit("lgbm --lookback 至少为 60（默认 252，约一年交易日）")
         if horizon < 1:
-            raise SystemExit("lgbm --horizon 至少为 1")
+            raise SystemExit("lgbm --horizon 至少为 1（默认 20，与 20 日调仓对齐）")
+        if not 0.0 <= blend <= 1.0:
+            raise SystemExit("lgbm --blend 须在 0 与 1 之间（树分权重，其余为等权）")
+        if not 0.0 <= smooth < 1.0:
+            raise SystemExit("lgbm --smooth 须在 [0, 1)（上期分数权重）")
         return cls(
             legs,
             n=n,
@@ -196,6 +291,8 @@ class LgbmWeightedTopK(Strategy):
             rebalance=spec,
             lookback=lookback,
             horizon=horizon,
+            blend=blend,
+            smooth=smooth,
         )
 
     @classmethod
@@ -206,6 +303,8 @@ class LgbmWeightedTopK(Strategy):
             rebalance_field("20", placeholder="daily / weekly / 20"),
             cli_field("lookback", "LGBM回看天数", "int", default=DEFAULT_LOOKBACK),
             cli_field("horizon", "LGBM持有期", "int", default=DEFAULT_HORIZON),
+            cli_field("blend", "树分权重", "float", default=DEFAULT_BLEND),
+            cli_field("smooth", "上期分数平滑", "float", default=DEFAULT_SMOOTH),
         ]
 
     @classmethod
@@ -228,7 +327,9 @@ class LgbmWeightedTopK(Strategy):
         tag += spec.tag_suffix()
         lookback = int(getattr(args, "lookback", None) or DEFAULT_LOOKBACK)
         horizon = int(getattr(args, "horizon", None) or DEFAULT_HORIZON)
-        tag += f"_lgb{lookback}h{horizon}"
+        blend = getattr(args, "blend", None)
+        b = DEFAULT_BLEND if blend is None else float(blend)
+        tag += f"_lgb{lookback}h{horizon}rk{int(round(b * 100))}"
         return tag
 
     def __init__(
@@ -240,6 +341,8 @@ class LgbmWeightedTopK(Strategy):
         lookback: int = DEFAULT_LOOKBACK,
         horizon: int = DEFAULT_HORIZON,
         min_rows: int = DEFAULT_MIN_ROWS,
+        blend: float = DEFAULT_BLEND,
+        smooth: float = DEFAULT_SMOOTH,
     ):
         legs: List[FactorLeg] = []
         for item in factors:
@@ -256,11 +359,14 @@ class LgbmWeightedTopK(Strategy):
         self.rebalance = (
             parse_rebalance(rebalance) if not isinstance(rebalance, RebalanceSpec) else rebalance
         )
-        self.lookback = max(20, int(lookback))
+        self.lookback = max(60, int(lookback))
         self.horizon = max(1, int(horizon))
         self.min_rows = max(80, int(min_rows))
+        self.blend = float(np.clip(blend, 0.0, 1.0))
+        self.smooth = float(np.clip(smooth, 0.0, 0.95))
         self._gate = RebalanceGate(self.rebalance)
         self.last_model: Optional[object] = None
+        self._prev_score: Optional[np.ndarray] = None
 
     @property
     def factor_names(self) -> List[str]:
@@ -285,8 +391,15 @@ class LgbmWeightedTopK(Strategy):
             lookback=self.lookback,
             horizon=self.horizon,
             min_rows=self.min_rows,
+            blend=self.blend,
         )
         self.last_model = model
+        if self._prev_score is not None and self._prev_score.shape == score.shape and self.smooth > 0:
+            both = np.isfinite(score) & np.isfinite(self._prev_score)
+            mixed = score.copy()
+            mixed[both] = (1.0 - self.smooth) * score[both] + self.smooth * self._prev_score[both]
+            score = mixed
+        self._prev_score = np.asarray(score, dtype=np.float64)
         return score
 
     def score(self, ctx: DayContext) -> TargetHoldings:

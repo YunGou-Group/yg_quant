@@ -23,6 +23,7 @@ class BaseFactor(ABC):
     name: str = ""
     description: str = ""
     dependencies: List[str] = []
+    factor_dependencies: List[str] = []
     role: str = "alpha"
     stage: str = "production"
     lookback_days: int = 450
@@ -53,6 +54,10 @@ class BaseFactor(ABC):
         返回依赖的基础数据字段列表
         """
         return self.dependencies
+
+    def get_factor_dependencies(self) -> List[str]:
+        """其它因子名。更新器先算这些，再算本因子。"""
+        return list(self.factor_dependencies or [])
     
     def _get_logger(self):
         """获取logger，延迟初始化"""

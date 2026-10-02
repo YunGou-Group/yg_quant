@@ -24,6 +24,8 @@ const previewCols = computed(() => {
     "factor_name",
     "rank_ic_mean",
     "rank_ic_ir",
+    "rank_ic_20_mean",
+    "rank_ic_20_ir",
     "ic_mean",
     "coverage_rate_mean",
     "quantile_spread_mean",

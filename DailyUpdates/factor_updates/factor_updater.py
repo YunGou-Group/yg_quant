@@ -61,6 +61,7 @@ class FactorUpdater:
         self.storage = SQLiteStorage(db_path)
         self.max_workers = max_workers
         self.rebuild = _env_flag("YG_QUANT_FACTOR_REBUILD") if rebuild is None else bool(rebuild)
+        self._rebuild_scope: Optional[set] = None
         self.logger = logging.getLogger("FactorUpdater")
         if self.rebuild:
             self.logger.warning("强制全量重算模式：所有选中因子将整段覆盖写入")
@@ -128,7 +129,9 @@ class FactorUpdater:
         return self._history_start_env()
 
     def _is_full_rebuild(self, factor_name: str) -> bool:
-        if self.rebuild:
+        if self.rebuild and (
+            self._rebuild_scope is None or factor_name in self._rebuild_scope
+        ):
             return True
         return self.factor_storage.get_factor_latest_date(factor_name) is None
 
@@ -182,6 +185,64 @@ class FactorUpdater:
             ", ".join(f.get_name() for f in selected),
         )
         return selected
+
+    def _expand_with_factor_deps(self, selected: Sequence[BaseFactor]) -> List[BaseFactor]:
+        """--only 合成因子时自动带上 factor_dependencies，保证子因子先更新。"""
+        by_name = {factor.get_name(): factor for factor in self.factors}
+        seen = {factor.get_name() for factor in selected}
+        extra: List[BaseFactor] = []
+        queue = list(selected)
+        missing: List[str] = []
+        while queue:
+            factor = queue.pop()
+            for dep in factor.get_factor_dependencies():
+                name = str(dep).strip()
+                if not name or name in seen:
+                    continue
+                child = by_name.get(name)
+                if child is None:
+                    missing.append(name)
+                    seen.add(name)
+                    continue
+                seen.add(name)
+                extra.append(child)
+                queue.append(child)
+        if missing:
+            self.logger.warning(
+                "合成因子依赖未注册为 BaseFactor（将尝试直接读 bin）: %s",
+                ", ".join(sorted(set(missing))),
+            )
+        if extra:
+            self.logger.info(
+                "补入合成因子依赖 %s 个: %s",
+                len(extra),
+                ", ".join(factor.get_name() for factor in extra),
+            )
+            return extra + list(selected)
+        return list(selected)
+
+    def _dependency_waves(self, selected: Sequence[BaseFactor]) -> List[List[BaseFactor]]:
+        """按 factor_dependencies 分层，子因子在前。"""
+        by_name = {factor.get_name(): factor for factor in selected}
+        remaining = set(by_name)
+        waves: List[List[BaseFactor]] = []
+        while remaining:
+            wave = []
+            for name in sorted(remaining):
+                deps = [
+                    str(item)
+                    for item in by_name[name].get_factor_dependencies()
+                    if str(item).strip()
+                ]
+                if any(dep in remaining for dep in deps):
+                    continue
+                wave.append(by_name[name])
+            if not wave:
+                raise ValueError("因子相互依赖，无法确定计算顺序: " + ", ".join(sorted(remaining)))
+            for factor in wave:
+                remaining.remove(factor.get_name())
+            waves.append(wave)
+        return waves
 
     def _resolve_load_start(
         self,
@@ -381,6 +442,9 @@ class FactorUpdater:
                 "因子模块导入失败，拒绝更新/清理: " + ", ".join(self._import_errors)
             )
         selected = self._select_factors(names)
+        # --rebuild 只覆盖点名的因子；自动补入的子因子仍按水位增量，避免合成因子拖着重算全家。
+        self._rebuild_scope = None if names is None else {factor.get_name() for factor in selected}
+        selected = self._expand_with_factor_deps(selected)
         # 全量更新才清已下线因子；指定 names 时不要误删未选中的系列。
         if names is None:
             self.purge_removed_factors()
@@ -411,6 +475,28 @@ class FactorUpdater:
             self.logger.error("SQLite 中没有可用于因子计算的行情数据")
             return []
 
+        waves = self._dependency_waves(selected)
+        if len(waves) > 1:
+            self.logger.info(
+                "按因子依赖分 %s 批: %s",
+                len(waves),
+                " -> ".join(
+                    "[" + ", ".join(factor.get_name() for factor in wave) + "]"
+                    for wave in waves
+                ),
+            )
+        results: List[Dict] = []
+        for wave in waves:
+            self._run_factor_batch(wave, market_data, end_date, results)
+        return results
+
+    def _run_factor_batch(
+        self,
+        selected: Sequence[BaseFactor],
+        market_data: pd.DataFrame,
+        end_date: Optional[str],
+        results: List[Dict],
+    ) -> None:
         full_rebuild = [
             f for f in selected if self._is_full_rebuild(f.get_name())
         ]
@@ -419,7 +505,6 @@ class FactorUpdater:
         ]
         if incremental:
             self._assert_adjust_matches([f.get_name() for f in incremental])
-        results: List[Dict] = []
 
         # 全量重建：串行，算一个写一个并释放，避免多因子结果叠加占满内存
         if full_rebuild:
@@ -476,14 +561,13 @@ class FactorUpdater:
             finally:
                 write_pool.shutdown(wait=True)
 
-        return results
-
     def get_factor_status(self) -> Dict[str, Dict]:
         return {
             factor.get_name(): {
                 "registered": self.factor_storage.is_factor_registered(factor.get_name()),
                 "description": factor.description,
                 "dependencies": factor.dependencies,
+                "factor_dependencies": factor.get_factor_dependencies(),
                 "latest_date": self.factor_storage.get_factor_latest_date(
                     factor.get_name()
                 ),

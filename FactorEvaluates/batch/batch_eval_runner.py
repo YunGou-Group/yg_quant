@@ -448,6 +448,7 @@ class BatchEvalRunner:
         dummy.intermediates["quantile_labels"] = np.ones((40, 1), dtype=np.int32)
         dummy.intermediates["fwd_decay"] = np.zeros((len(DECAY_HORIZONS), 40), dtype=np.float64)
         dummy.intermediates["decay_horizons"] = tuple(int(n) for n in DECAY_HORIZONS)
+        dummy.intermediates["fwd_20"] = np.zeros(40, dtype=np.float64)
         names = [str(n) for n in (x_names or ())]
         if not names:
             names = ["intercept", "style_size", "style_beta", "ind_801010"]

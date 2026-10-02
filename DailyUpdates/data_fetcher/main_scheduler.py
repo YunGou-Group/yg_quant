@@ -244,7 +244,7 @@ def main():
             'data_type': 'index',
             'api_name': 'index_daily',
             'token': tushare_token,
-            # 上证指数 / 深证成指 / 创业板指 / 沪深300 / 中小综指 / 中证A500
+            # 上证 / 深成 / 创业板 / 沪深300 / 中小综指 / A500 / 50 / 科创 / 1000 / 500 / 中证全A
             'index_list': [
                 '000001.SH',
                 '399001.SZ',

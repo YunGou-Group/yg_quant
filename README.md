@@ -89,10 +89,13 @@ python -m DailyUpdates.data_fetcher.main_scheduler
 ```powershell
 python -m DailyUpdates.factor_updates.factor_updater
 python -m DailyUpdates.factor_updates.factor_updater --only "style_*"
+python -m DailyUpdates.factor_updates.factor_updater --only "emotion_*,risk_*,technical_*,momentum_*"
+python -m DailyUpdates.factor_updates.factor_updater --only "quality_*,basics_*,growth_*,pershare_*"
+python -m DailyUpdates.factor_updates.factor_updater --only lgbm_combo_8
 python -m DailyUpdates.factor_updates.factor_updater --rebuild
 ```
 
-改过实现或复权口径后必须 `--rebuild`，再重跑全库评估。因子放在 `DailyUpdates/factor_updates/factors/`，继承 `BaseFactor`。
+改过实现或复权口径后必须 `--rebuild`，再重跑全库评估。因子放在 `DailyUpdates/factor_updates/factors/`，继承 `BaseFactor`。合成因子声明 `factor_dependencies`，更新器先算子因子；`--only` 会自动带上依赖。`lgbm_combo_8` 用与 `lgbm` 策略相同的 LambdaRank（lookback=252、horizon=20、blend=0.45、smooth=0.40），每 20 个交易日重拟合，中间日向前填充，写入后可当普通因子看 IC。
 
 | 参数 | 含义 |
 |------|------|
@@ -115,7 +118,7 @@ npm run dev
 
 ## 因子评估
 
-远期收益：`fwd_ret_Nd[T] = open[T+1+N] / open[T+1] - 1`。
+远期收益：`fwd_ret_Nd[T] = open[T+1+N] / open[T+1] - 1`。默认 IC / RankIC 是 N=5；`ic_20` / `rank_ic_20` 用 N=20 的累计远期收益，给 20 日调仓筛因子。`ic_decay_20d` 只是把 5 日标签往后挪 20 日，不是 20 日持有期 IC。
 
 ```powershell
 python -m FactorEvaluates.run_batch --start 2010-01-01
@@ -130,7 +133,7 @@ python -m FactorEvaluates.run_batch --start 2010-01-01 --xt
 | 参数 | 默认 | 含义 |
 |------|------|------|
 | `--start` | `2010-01-01` | 评估起点 |
-| `--end` | 日历末日 | 评估终点 |
+| `--end` | 行情最后交易日 | 评估终点（不是 trade_calendar 里尚未拉行情的未来开市日） |
 | `--universe` | `all` | 股票池，与回测相同 |
 | `--horizon` | `5` | 远期收益天数 N |
 | `--batch-size` | `32` | 一次装入内存的因子个数 |
@@ -161,7 +164,7 @@ python -m StrategyEngine --mode live --strategy small_cap --cash 500000 --accoun
 python -m StrategyEngine --mode attribute --run small_cap_20260902_120000
 ```
 
-`--mode` 必填。`equal`：各因子截面 z 等权平均后 Top N，作合成基准。`icir`：滚动 RankIC 的 ICIR 加权合成后再 Top N（负 ICIR 置 0）。`lgbm`：同一套已实现远期收益上滚动训练 LightGBM，再按预测分 Top N。`icir` / `lgbm` 可用 `--lookback` / `--horizon`（默认 60 / 5），前缀 `-` 表示取负。实盘写出 `data/strategy_runs/live/qmt_orders.json`，客户端脚本见 [`qmt_scripts/`](qmt_scripts/README.md)。归因读已有回测快照，不重跑策略。也可 `python -m StrategyEngine.attribution --run <快照id>`。
+`--mode` 必填。`equal`：各因子截面 z 等权平均后 Top N，作合成基准。`icir`：滚动 RankIC 的 ICIR 加权合成后再 Top N（负 ICIR 置 0）。`lgbm`：已实现持有期上用 LambdaRank 学截面排序，预测分与等权 z 混合后再 Top N。前缀 `-` 表示取负。策略自己的参数写在 `cli_fields` 里，CLI 启动时按 `--key` 自动登记（下划线变连字符，如 `anti_tail` → `--anti-tail`），默认值由该策略的 `from_cli` 处理。`python -m StrategyEngine --help` 列出当前已发现项。实盘写出 `data/strategy_runs/live/qmt_orders.json`，客户端脚本见 [`qmt_scripts/`](qmt_scripts/README.md)。归因读已有回测快照，不重跑策略。也可 `python -m StrategyEngine.attribution --run <快照id>`。
 
 **通用**
 
@@ -169,7 +172,7 @@ python -m StrategyEngine --mode attribute --run small_cap_20260902_120000
 |------|------|------|
 | `--mode` | 必填 | `backtest` 开盘撮合；`live` 写 QMT JSON；`attribute` 读某次回测做归因 |
 | `--strategy` | `topk`（若存在） | `Strategies/` 里已发现的策略 |
-| `--start` / `--end` | `2010-01-01` / 日历末日 | 回测区间 |
+| `--start` / `--end` | `2010-01-01` / 行情最后交易日 | 回测区间 |
 | `--universe` | `all` | 股票池 |
 | `--allocator` | `equal` | 候选选出后的权重。可选 `min_vol`、`max_sharpe`、`max_quadratic_utility`、`efficient_return`、`efficient_risk`、`multiobjective`、`min_l2`、`min_semivariance`、`min_cvar`、`min_cdar`、`hrp` |
 | `--cash` | `1000000` | 回测初始资金；实盘是分配给该策略的资金 |
@@ -177,17 +180,7 @@ python -m StrategyEngine --mode attribute --run small_cap_20260902_120000
 | `--benchmark` | 沪深300 | 基准指数代码；空字符串或 `--no-benchmark` 关闭 |
 | `--out` | 自动 | 回测净值 CSV / 归因 JSON 路径 |
 
-**策略相关**
-
-| 参数 | 含义 |
-|------|------|
-| `--factor` | topk：单因子；`equal` / `icir` / `lgbm`：逗号列表（`-name` 取负） |
-| `--n` | topk / equal / icir / lgbm 持仓数，或小市值候选数 |
-| `--rebalance` | topk / equal / icir / lgbm：`daily`、`weekly`，或 N 个交易日（`5` / `20` / `every20`） |
-| `--lookback` | icir / lgbm 回看交易日，默认 60 |
-| `--horizon` | icir / lgbm 远期收益持有交易日，默认 5 |
-| `--hold` | 小市值：剔除最小后取到第 N 名，默认 `6` |
-| `--anti-tail` | 小市值防尾声 |
+**策略参数**由各策略的 `cli_fields` 声明。新策略加字段只需改策略类。
 
 **仓位优化**（`--allocator` 不是 `equal` 时）
 

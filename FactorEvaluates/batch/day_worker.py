@@ -27,6 +27,7 @@ def evaluate_date_range(
     fwd: np.ndarray,
     fwd_decay: Optional[np.ndarray],
     decay_horizons: Sequence[int],
+    fwd_20: Optional[np.ndarray] = None,
     style: Optional[np.ndarray],
     x_t: Optional[np.ndarray],
     x_names: Sequence[str],
@@ -82,6 +83,15 @@ def evaluate_date_range(
                         np.float64, copy=False
                     )
                     batch.intermediates["decay_horizons"] = tuple(int(h) for h in decay_horizons)
+                if fwd_20 is not None:
+                    batch.intermediates["fwd_20"] = np.asarray(
+                        fwd_20[t, row_mask], dtype=np.float64
+                    )
+                else:
+                    # horizon=20 时主标签就是 20 日累计；否则不要把 5 日收益冒充成 fwd_20
+                    batch.intermediates["fwd_20"] = np.asarray(
+                        fwd[t, row_mask], dtype=np.float64
+                    )
                 if labels is not None:
                     labels[t, row_mask, :] = q_labels.astype(np.int8, copy=False)
                 for metric in metrics:
@@ -155,6 +165,7 @@ def _evaluate_with_views(
         fwd=views["fwd"],
         fwd_decay=views.get("fwd_decay") if spec.get("has_decay") else None,
         decay_horizons=spec.get("decay_horizons") or (),
+        fwd_20=views.get("fwd_20") if spec.get("has_fwd_20") else None,
         style=views.get("style") if spec.get("has_style") else None,
         x_t=views.get("x_t") if spec.get("has_xt") else None,
         x_names=spec.get("x_names") or (),
