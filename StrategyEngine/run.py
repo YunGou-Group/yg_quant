@@ -28,6 +28,7 @@ from Universes.catalog import (
 )
 
 from .catalog import bind_strategy_fields, by_name, fields_of
+from .strategy import shorten_run_tag
 
 _LOG = logging.getLogger("StrategyEngine")
 _SAFE_STEM = re.compile(r"^[\w.\-]+$")
@@ -227,7 +228,7 @@ def build(args):
         warmup=_panel_warmup(spec, args, allocator),
         **spec.panel_kwargs(args),
     )
-    return store, strategy, spec.run_tag(args) + suffix
+    return store, strategy, shorten_run_tag(spec.run_tag(args) + suffix)
 
 
 def run_backtest(

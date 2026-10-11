@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import gc
 import os
+import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -64,7 +67,8 @@ class BatchEvalRunner:
         batch_size = max(1, int(request.get("batch_size") or self.batch_size or 32))
         n_workers = int(request.get("n_workers") if request.get("n_workers") is not None else self.n_workers)
         # 未传 xt 时保持旧行为（网页勾选了暴露就跑）；CLI 会显式传 True/False
-        allow_xt = True if "xt" not in request else bool(request.get("xt"))
+        explicit_xt = "xt" in request or "xt_full" in request
+        allow_xt = True if not explicit_xt else bool(request.get("xt") or request.get("xt_full"))
         planned = self.plan_metrics(
             self.discoverer,
             request.get("metrics"),
@@ -74,6 +78,15 @@ class BatchEvalRunner:
         label_metrics = planned["label"]
         crossday_metrics = planned["crossday"]
         library_metrics = planned["library"]
+        if request.get("xt_full"):
+            xt_full = True
+        elif explicit_xt:
+            xt_full = False
+            daily_metrics = [m for m in daily_metrics if m.get_name() != "attribution"]
+            planned["need_xt"] = any(m.get_name() in {"exposure", "pure_ic"} for m in daily_metrics)
+            planned["need_style"] = planned["need_xt"] or planned["need_style"]
+        else:
+            xt_full = any(m.get_name() == "attribution" for m in daily_metrics)
         need_xt = planned["need_xt"]
         need_style = planned["need_style"]
         need_decay = any(m.get_name() == "ic_decay" for m in daily_metrics)
@@ -87,6 +100,7 @@ class BatchEvalRunner:
             decay_horizons=DECAY_HORIZONS if need_decay else (),
             load_style=need_style,
             load_xt=need_xt,
+            xt_full=bool(xt_full),
             factor_loader=self.factor_loader,
             progress=say,
         )
@@ -220,6 +234,8 @@ class BatchEvalRunner:
             "library_metrics": library_names,
             "daily_keys": sorted(arrays.keys()),
             "has_xt": store.x_t is not None,
+            "xt_full": bool(xt_full),
+            "x_t_cols": list(store.x_names),
             "has_style": bool(store.style) or store.x_t is not None or planned["need_style"],
             "elapsed_sec": elapsed,
             "output_dir": str(out_dir),
@@ -246,49 +262,69 @@ class BatchEvalRunner:
         """补齐跨批因子对的相关块。
 
         主循环只在每批内部算相关，非对角块会全是 NaN，导致 factor_corr /
-        family_redundancy 只能看到同批因子。这里按批对 (i<j) 重载两批立方，
-        用同样的口径累加非对角块。日期可用 corr_date_stride 抽样降成本。
+        family_redundancy 只能看到同批因子。每批立方只加载并截面排名一次，
+        秩缓存到临时文件后按批对累加。日期可用 corr_date_stride 抽样降成本。
         """
-        from ..matrix_utils import spearman_cross_corr
+        from ..matrix_utils import accumulate_spearman_cross_corr, rank_cube_masked
 
         chunks = loader.chunks(list(names))
         if len(chunks) < 2:
             return
-        n_pairs = len(chunks) * (len(chunks) - 1) // 2
+        n_batches = len(chunks)
+        n_pairs = n_batches * (n_batches - 1) // 2
         cols = [np.array([name_index[n] for n in chunk], dtype=int) for chunk in chunks]
-        days = range(0, store.mask.shape[0], max(1, int(stride)))
-        done = 0
-        for i in range(len(chunks)):
-            cube_i = loader.load_cube(chunks[i])
-            for j in range(i + 1, len(chunks)):
+        stride = max(1, int(stride))
+        tmpdir = tempfile.mkdtemp(prefix="yg_cross_corr_")
+        paths: List[str] = []
+        try:
+            for i, chunk in enumerate(chunks):
                 progress(
                     "cross_corr",
                     "",
                     0.78,
-                    f"跨批因子相关 {done + 1}/{n_pairs}",
+                    f"截面排名 {i + 1}/{n_batches}",
                 )
-                cube_j = loader.load_cube(chunks[j])
-                block = np.zeros((len(chunks[i]), len(chunks[j])), dtype=np.float64)
-                block_n = np.zeros_like(block)
-                for t in days:
-                    row = store.mask[t]
-                    if int(row.sum()) < min_obs:
-                        continue
-                    corr = spearman_cross_corr(
-                        cube_i[t, row, :].astype(np.float64, copy=False),
-                        cube_j[t, row, :].astype(np.float64, copy=False),
-                        min_obs=min_obs,
-                    )
-                    finite = np.isfinite(corr)
-                    block = np.where(finite, block + corr, block)
-                    block_n += finite
-                del cube_j
-                acc_corr[np.ix_(cols[i], cols[j])] += block
-                acc_corr_n[np.ix_(cols[i], cols[j])] += block_n
-                acc_corr[np.ix_(cols[j], cols[i])] += block.T
-                acc_corr_n[np.ix_(cols[j], cols[i])] += block_n.T
-                done += 1
-            del cube_i
+                cube = loader.load_cube(chunk)
+                ranked = rank_cube_masked(
+                    cube, store.mask, min_obs=min_obs, stride=stride
+                )
+                del cube
+                path = os.path.join(tmpdir, f"r{i}.npy")
+                np.save(path, np.ascontiguousarray(ranked, dtype=np.float32))
+                del ranked
+                paths.append(path)
+            done = 0
+            for i in range(n_batches):
+                ranked_i = np.load(paths[i], mmap_mode="r")
+                try:
+                    for j in range(i + 1, n_batches):
+                        progress(
+                            "cross_corr",
+                            "",
+                            0.78,
+                            f"跨批因子相关 {done + 1}/{n_pairs}",
+                        )
+                        ranked_j = np.load(paths[j], mmap_mode="r")
+                        try:
+                            block, block_n = accumulate_spearman_cross_corr(
+                                ranked_i,
+                                ranked_j,
+                                store.mask,
+                                min_obs=min_obs,
+                                stride=stride,
+                            )
+                        finally:
+                            del ranked_j
+                        acc_corr[np.ix_(cols[i], cols[j])] += block
+                        acc_corr_n[np.ix_(cols[i], cols[j])] += block_n
+                        acc_corr[np.ix_(cols[j], cols[i])] += block.T
+                        acc_corr_n[np.ix_(cols[j], cols[i])] += block_n.T
+                        done += 1
+                finally:
+                    del ranked_i
+        finally:
+            gc.collect()
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     @staticmethod
     def plan_metrics(

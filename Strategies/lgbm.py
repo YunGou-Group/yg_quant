@@ -10,8 +10,9 @@
 2. 标签是截面收益五档相关度（0–4），用 LambdaRank 学排序，不是个股收益 MSE
 3. 预测分截面 z 后与等权 z 按 blend 混合，再与上期分数平滑，压换手
 
+每 --refit 个交易日重训一次，同一模型沿用到下次重训；调仓日只用冻结模型打分。
 只用 asof 及之前已实现的 t→t+H 收益。样本不足或未安装 lightgbm 时回退等权 z-score。
-默认 lookback=252、horizon=20。
+默认 lookback=252、horizon=20、refit=20。
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ logger = logging.getLogger("Strategies.lgbm")
 DEFAULT_N = 50
 DEFAULT_LOOKBACK = 252
 DEFAULT_HORIZON = 20
+DEFAULT_REFIT = 20
 DEFAULT_MIN_ROWS = 400
 DEFAULT_BLEND = 0.45
 DEFAULT_SMOOTH = 0.40
@@ -200,41 +202,41 @@ def combine_scores_lgbm(
     horizon: int,
     min_rows: int = DEFAULT_MIN_ROWS,
     blend: float = DEFAULT_BLEND,
+    model: Optional[object] = None,
 ) -> Tuple[np.ndarray, Optional[object]]:
-    """LambdaRank 拟合后与等权 z 混合。失败则等权回退。"""
+    """LambdaRank 拟合后与等权 z 混合。失败则等权回退。传入 model 则只打分不重训。"""
     need = int(lookback) + int(horizon)
     today_uni = np.asarray(mask_hist[-1], dtype=bool)
     today_panels = [np.asarray(p)[-1] for p in factor_hist]
     eq = equal_weight_scores(today_panels, signs, today_uni)
     if not factor_hist:
         return eq, None
-    for panel in factor_hist:
-        if np.asarray(panel).shape[0] < need:
+    fitted = model
+    if fitted is None:
+        for panel in factor_hist:
+            if np.asarray(panel).shape[0] < need:
+                return eq, None
+        lgb = _try_lightgbm()
+        if lgb is None:
+            logger.warning("未安装 lightgbm，lgbm 策略回退等权 z-score")
             return eq, None
-
-    lgb = _try_lightgbm()
-    if lgb is None:
-        logger.warning("未安装 lightgbm，lgbm 策略回退等权 z-score")
-        return eq, None
-
-    x, y, groups = stack_realized_xy(
-        factor_hist,
-        signs,
-        close_hist,
-        mask_hist,
-        lookback=lookback,
-        horizon=horizon,
-        seed=42 + int(lookback) + int(horizon),
-    )
-    need_rows = max(int(min_rows), 80 * len(factor_hist))
-    if groups.size < MIN_GROUPS or x.shape[0] < need_rows:
-        return eq, None
-
-    try:
-        model = _fit_ranker(lgb, x, y, groups)
-    except Exception:
-        logger.exception("LightGBM 排序拟合失败，回退等权")
-        return eq, None
+        x, y, groups = stack_realized_xy(
+            factor_hist,
+            signs,
+            close_hist,
+            mask_hist,
+            lookback=lookback,
+            horizon=horizon,
+            seed=42 + int(lookback) + int(horizon),
+        )
+        need_rows = max(int(min_rows), 80 * len(factor_hist))
+        if groups.size < MIN_GROUPS or x.shape[0] < need_rows:
+            return eq, None
+        try:
+            fitted = _fit_ranker(lgb, x, y, groups)
+        except Exception:
+            logger.exception("LightGBM 排序拟合失败，回退等权")
+            return eq, None
 
     z_cols = []
     for panel, sign in zip(today_panels, signs):
@@ -244,8 +246,8 @@ def combine_scores_lgbm(
     tree = np.full(today_uni.shape, np.nan, dtype=np.float64)
     ok = today_uni & np.all(np.isfinite(z), axis=1)
     if int(ok.sum()) == 0:
-        return eq, None
-    pred = np.asarray(model.predict(z[ok]), dtype=np.float64)
+        return eq, fitted
+    pred = np.asarray(fitted.predict(z[ok]), dtype=np.float64)
     tree[ok] = pred
     tz = cross_section_z(tree, ok)
     b = float(np.clip(blend, 0.0, 1.0))
@@ -254,7 +256,7 @@ def combine_scores_lgbm(
     out[both] = (1.0 - b) * eq[both] + b * tz[both]
     only_tree = np.isfinite(tz) & ~np.isfinite(eq)
     out[only_tree] = tz[only_tree]
-    return out, model
+    return out, fitted
 
 
 class LgbmWeightedTopK(Strategy):
@@ -272,6 +274,11 @@ class LgbmWeightedTopK(Strategy):
         spec = spec_from_cli(getattr(args, "rebalance", None) or "20")
         lookback = int(getattr(args, "lookback", None) or DEFAULT_LOOKBACK)
         horizon = int(getattr(args, "horizon", None) or DEFAULT_HORIZON)
+        refit = int(
+            getattr(args, "refit", None)
+            if getattr(args, "refit", None) is not None
+            else DEFAULT_REFIT
+        )
         blend = float(getattr(args, "blend", None) if getattr(args, "blend", None) is not None else DEFAULT_BLEND)
         smooth = float(
             getattr(args, "smooth", None) if getattr(args, "smooth", None) is not None else DEFAULT_SMOOTH
@@ -280,6 +287,8 @@ class LgbmWeightedTopK(Strategy):
             raise SystemExit("lgbm --lookback 至少为 60（默认 252，约一年交易日）")
         if horizon < 1:
             raise SystemExit("lgbm --horizon 至少为 1（默认 20，与 20 日调仓对齐）")
+        if refit < 1:
+            raise SystemExit("lgbm --refit 至少为 1（默认 20，同一模型沿用天数）")
         if not 0.0 <= blend <= 1.0:
             raise SystemExit("lgbm --blend 须在 0 与 1 之间（树分权重，其余为等权）")
         if not 0.0 <= smooth < 1.0:
@@ -291,6 +300,7 @@ class LgbmWeightedTopK(Strategy):
             rebalance=spec,
             lookback=lookback,
             horizon=horizon,
+            refit=refit,
             blend=blend,
             smooth=smooth,
         )
@@ -303,6 +313,7 @@ class LgbmWeightedTopK(Strategy):
             rebalance_field("20", placeholder="daily / weekly / 20"),
             cli_field("lookback", "LGBM回看天数", "int", default=DEFAULT_LOOKBACK),
             cli_field("horizon", "LGBM持有期", "int", default=DEFAULT_HORIZON),
+            cli_field("refit", "同一模型沿用交易日数", "int", default=DEFAULT_REFIT),
             cli_field("blend", "树分权重", "float", default=DEFAULT_BLEND),
             cli_field("smooth", "上期分数平滑", "float", default=DEFAULT_SMOOTH),
         ]
@@ -327,9 +338,10 @@ class LgbmWeightedTopK(Strategy):
         tag += spec.tag_suffix()
         lookback = int(getattr(args, "lookback", None) or DEFAULT_LOOKBACK)
         horizon = int(getattr(args, "horizon", None) or DEFAULT_HORIZON)
+        refit = DEFAULT_REFIT if getattr(args, "refit", None) is None else int(args.refit)
         blend = getattr(args, "blend", None)
         b = DEFAULT_BLEND if blend is None else float(blend)
-        tag += f"_lgb{lookback}h{horizon}rk{int(round(b * 100))}"
+        tag += f"_lgb{lookback}h{horizon}rf{refit}rk{int(round(b * 100))}"
         return tag
 
     def __init__(
@@ -340,6 +352,7 @@ class LgbmWeightedTopK(Strategy):
         rebalance: str | RebalanceSpec = "20",
         lookback: int = DEFAULT_LOOKBACK,
         horizon: int = DEFAULT_HORIZON,
+        refit: int = DEFAULT_REFIT,
         min_rows: int = DEFAULT_MIN_ROWS,
         blend: float = DEFAULT_BLEND,
         smooth: float = DEFAULT_SMOOTH,
@@ -361,16 +374,23 @@ class LgbmWeightedTopK(Strategy):
         )
         self.lookback = max(60, int(lookback))
         self.horizon = max(1, int(horizon))
+        self.refit = max(1, int(refit))
         self.min_rows = max(80, int(min_rows))
         self.blend = float(np.clip(blend, 0.0, 1.0))
         self.smooth = float(np.clip(smooth, 0.0, 0.95))
         self._gate = RebalanceGate(self.rebalance)
         self.last_model: Optional[object] = None
+        self._fitted_t: Optional[int] = None
         self._prev_score: Optional[np.ndarray] = None
 
     @property
     def factor_names(self) -> List[str]:
         return [name for name, _ in self.legs]
+
+    def _need_refit(self, t: int) -> bool:
+        if self.last_model is None or self._fitted_t is None:
+            return True
+        return int(t) - int(self._fitted_t) >= int(self.refit)
 
     def _lgbm_score(self, ctx: DayContext) -> np.ndarray:
         need = self.lookback + self.horizon
@@ -383,7 +403,8 @@ class LgbmWeightedTopK(Strategy):
             mask = np.vstack([pad, mask])
         signs = [sign for _, sign in self.legs]
         factor_hist = [ctx.history(name, need) for name, _ in self.legs]
-        score, model = combine_scores_lgbm(
+        reuse = None if self._need_refit(ctx._t) else self.last_model
+        score, fitted = combine_scores_lgbm(
             factor_hist,
             signs,
             close,
@@ -392,8 +413,26 @@ class LgbmWeightedTopK(Strategy):
             horizon=self.horizon,
             min_rows=self.min_rows,
             blend=self.blend,
+            model=reuse,
         )
-        self.last_model = model
+        if self._need_refit(ctx._t):
+            if fitted is not None:
+                self.last_model = fitted
+                self._fitted_t = int(ctx._t)
+            elif self.last_model is not None:
+                score, _ = combine_scores_lgbm(
+                    factor_hist,
+                    signs,
+                    close,
+                    mask,
+                    lookback=self.lookback,
+                    horizon=self.horizon,
+                    min_rows=self.min_rows,
+                    blend=self.blend,
+                    model=self.last_model,
+                )
+        else:
+            self.last_model = fitted if fitted is not None else self.last_model
         if self._prev_score is not None and self._prev_score.shape == score.shape and self.smooth > 0:
             both = np.isfinite(score) & np.isfinite(self._prev_score)
             mixed = score.copy()

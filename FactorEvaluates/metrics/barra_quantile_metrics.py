@@ -15,8 +15,13 @@ from ..exposure_engine import RAW_STYLE_NAMES
 from ..field_doc import FieldDoc
 from ..metric_result import MetricResult
 from ..param_spec import HORIZON_PARAM, UNIVERSE_PARAM, ParamSpec
-from ..matrix_utils import apply_daily_matrix, result_from_daily, spearman_pairwise
-from .quantile_metric import N_QUANTILES_PARAM, _ensure_labels
+from ..matrix_utils import (
+    apply_daily_matrix,
+    pearson_cols,
+    rank_cols,
+    result_from_daily,
+)
+from .quantile_metric import N_QUANTILES_PARAM, _ensure_labels, _group_mean
 
 MIN_OBS = 10
 
@@ -129,7 +134,10 @@ def _derive_long_short_series(
 class LongShortBarraExposureMetric(BaseMetric):
     name = "long_short_barra_exposure"
     dimension = "风格暴露"
-    description = "分位组内 Barra 风格均值；并按 RankIC 方向派生多空端暴露"
+    description = (
+        "分位组内聚宽标准化风格均值（2.5σ 去极值，减市值加权均值 / 等权标准差）；"
+        "并按 RankIC 方向派生多空端暴露。不是入库 ln(市值)。"
+    )
     cost = "panel"
     produces = ()
     requires = ()
@@ -140,7 +148,12 @@ class LongShortBarraExposureMetric(BaseMetric):
 
     def fields(self) -> Sequence[FieldDoc]:
         return (
-            FieldDoc("mean", "风格暴露", "多头 Size 暴露均值", "long_short_barra_exposure_long_style_size 均值"),
+            FieldDoc(
+                "mean",
+                "风格暴露",
+                "多头 Size 暴露均值",
+                "long_short_barra_exposure_long_style_size：多头组聚宽标准化 Size 的截面均值",
+            ),
         )
 
     def compute_matrix(self, batch_ctx: BatchEvalContext, params: Mapping[str, Any]) -> Dict[str, Any]:
@@ -157,18 +170,15 @@ class LongShortBarraExposureMetric(BaseMetric):
             return out
         labels = _ensure_labels(batch_ctx, n_q)
         n_styles = min(b.shape[1], len(names))
+        finite_f = np.isfinite(f)
         for si in range(n_styles):
             style = names[si]
-            col = b[:, si]
+            col = np.asarray(b[:, si], dtype=np.float64)
+            style_ok = np.isfinite(col)
+            # 风格缺失的股票不进组均值；与因子列掩码对齐
+            lab = np.where(finite_f & style_ok[:, None], labels, 0)
             for qi in range(1, n_q + 1):
-                # 风格 NaN 不参与均值：按因子列掩码
-                vals = np.full(p, np.nan, dtype=np.float64)
-                for j in range(p):
-                    sel = (labels[:, j] == qi) & np.isfinite(col) & np.isfinite(f[:, j])
-                    if int(sel.sum()) <= 0:
-                        continue
-                    vals[j] = float(np.mean(col[sel]))
-                out[f"barra_exposure_Q{qi}_{style}"] = vals
+                out[f"barra_exposure_Q{qi}_{style}"] = _group_mean(col, lab, qi, 1)
         return out
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:
@@ -247,17 +257,18 @@ class BarraQuantileCorrelationMetric(BaseMetric):
         labels = _ensure_labels(batch_ctx, n_q)
         n_styles = min(b.shape[1], len(names))
         min_obs = max(MIN_OBS, int(params.get("min_obs", MIN_OBS)))
+        finite_f = np.isfinite(f)
         for si in range(n_styles):
             style = names[si]
-            col = b[:, si]
+            col = np.asarray(b[:, si], dtype=np.float64)
+            style_ok = np.isfinite(col)
             for qi in range(1, n_q + 1):
-                vals = np.full(p, np.nan, dtype=np.float64)
-                for j in range(p):
-                    sel = (labels[:, j] == qi) & np.isfinite(col) & np.isfinite(f[:, j])
-                    if int(sel.sum()) < min_obs:
-                        continue
-                    vals[j] = spearman_pairwise(f[sel, j : j + 1], col[sel], min_obs=min_obs)[0]
-                out[f"barra_corr_Q{qi}_{style}"] = vals
+                sel = (labels == qi) & finite_f & style_ok[:, None]
+                fm = np.where(sel, f, np.nan)
+                sm = np.where(sel, col[:, None], np.nan)
+                out[f"barra_corr_Q{qi}_{style}"] = pearson_cols(
+                    rank_cols(fm), rank_cols(sm), min_obs=min_obs
+                )
         return out
 
     def compute(self, ctx: EvalContext, params: Mapping[str, Any]) -> MetricResult:

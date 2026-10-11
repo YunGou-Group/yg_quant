@@ -42,6 +42,7 @@ def summarize(
         "fee_total": None,
         "gross_return": None,
         "excess_annualized": None,
+        "excess_max_drawdown": None,
         "risk_free_rate": float(risk_free_rate),
     }
     if n < 2 or nav[0] <= 0:
@@ -86,6 +87,13 @@ def summarize(
         if bench is not None and bench[0] > 0:
             b_ann = float((bench[-1] / bench[0]) ** (n_per_year / span) - 1.0)
             out["excess_annualized"] = out["annualized"] - b_ann
+            nav_n = nav / nav[0]
+            excess = pd.Series(np.where(bench > 0, nav_n / bench, np.nan))
+            excess = excess.where(excess > 0)
+            peak = excess.cummax()
+            dd_ex = excess / peak - 1.0
+            if dd_ex.notna().any():
+                out["excess_max_drawdown"] = float(dd_ex.min())
     return out
 
 

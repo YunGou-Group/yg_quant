@@ -161,6 +161,10 @@ const kpis = computed(() => {
     { label: "Calmar", value: num(m.calmar) },
     { label: "日均换手", value: pct(m.turnover_mean) },
     { label: benchName ? `超额年化（${benchName}）` : "超额年化", value: pct(m.excess_annualized) },
+    {
+      label: benchName ? `最大超额回撤（${benchName}）` : "最大超额回撤",
+      value: pct(m.excess_max_drawdown ?? excessMaxDrawdown(result.value?.equity)),
+    },
     { label: "交易日", value: m.n_days == null ? "—" : String(m.n_days) },
   ];
 });
@@ -506,6 +510,26 @@ function nestTree(rows) {
     stack.push(node);
   }
   return root;
+}
+
+function excessMaxDrawdown(equity) {
+  const nav = equity?.nav || [];
+  const bench = equity?.benchmark || [];
+  if (!nav.length || !bench.length) return null;
+  let peak = -Infinity;
+  let worst = null;
+  const n = Math.min(nav.length, bench.length);
+  for (let i = 0; i < n; i += 1) {
+    const nv = Number(nav[i]);
+    const bv = Number(bench[i]);
+    if (!Number.isFinite(nv) || !Number.isFinite(bv) || bv === 0) continue;
+    const excess = nv / bv;
+    if (!(excess > 0)) continue;
+    if (excess > peak) peak = excess;
+    const dd = excess / peak - 1;
+    if (worst == null || dd < worst) worst = dd;
+  }
+  return worst;
 }
 
 function pct(value) {

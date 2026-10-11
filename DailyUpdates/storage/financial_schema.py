@@ -110,6 +110,8 @@ FINANCIAL_VALUE_FIELDS: Tuple[str, ...] = (
     "ocf_yoy",
     "basic_eps_yoy",
     "tr_yoy",
+    "fixed_assets",
+    "non_op_profit",
 )
 
 # Tushare fina_indicator / fina_indicator_vip 请求字段

@@ -220,6 +220,8 @@ def main() -> None:
             parts.append(f"毛收益 {_pct(stats.get('gross_return'))}")
     if stats.get("excess_annualized") is not None:
         parts.append(f"超额 {_pct(stats['excess_annualized'])}")
+    if stats.get("excess_max_drawdown") is not None:
+        parts.append(f"超额回撤 {_pct(stats['excess_max_drawdown'])}")
     print("  ".join(parts))
 
 

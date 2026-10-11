@@ -16,6 +16,7 @@ from DailyUpdates.storage.etf_schema import (
     ETF_TUSHARE_BASIC_FIELDS,
     ETF_TUSHARE_DAILY_FIELDS,
 )
+from DailyUpdates.storage.event_schema import event_spec
 from DailyUpdates.storage.financial_schema import FINANCIAL_TUSHARE_FIELDS
 
 # index_weight 请求代码与配置代码可以不同，写入仍用配置里的代码。
@@ -45,6 +46,34 @@ def _is_non_retryable_tushare_error(exc: BaseException) -> bool:
         token in text
         for token in ("必填参数", "参数错误", "没有接口访问权限", "权限不足")
     )
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    return "频率" in _tushare_error_text(exc)
+
+
+class _EventWindowTruncated(RuntimeError):
+    """翻页回到同一页，或 offset 超过 10 万。日期区间需要拆开重拉。"""
+
+
+# 服务端拒绝 offset > 100000，超出后只能把日期区间拆小。
+_EVENT_OFFSET_LIMIT = 100000
+
+
+def _event_rate_wait_seconds(text: str) -> float:
+    """分钟额度等 65 秒，小时额度等 10 分钟，日额度等到次日 00:05。"""
+    if "天" in text:
+        now = pd.Timestamp.now()
+        wake = now.normalize() + pd.Timedelta(days=1, minutes=5)
+        return max((wake - now).total_seconds(), 60.0)
+    if "小时" in text:
+        return 600.0
+    return 65.0
+
+
+def _is_offset_ceiling(text: str) -> bool:
+    lowered = text.lower()
+    return "offset" in lowered and ("100000" in lowered or "缩小" in text)
 
 
 def _is_unreleased_period_error(exc: BaseException) -> bool:
@@ -145,6 +174,9 @@ class TushareDataSource(DataSourceBase):
             if api_name in ('fina_indicator', 'fina_indicator_vip'):
                 return self._fetch_fina_indicator(config, fields, start_date, end_date)
             raise ValueError(f"不支持的财务API接口: {api_name}")
+
+        elif data_type == 'event':
+            return self._fetch_event(config, fields, start_date, end_date)
 
         elif data_type == 'index_constituent':
             if api_name == 'index_weight':
@@ -509,6 +541,283 @@ class TushareDataSource(DataSourceBase):
         if subset:
             result = result.drop_duplicates(subset=subset, keep="last")
         print(f"[stock_info] namechange 合计 {len(result)} 行", flush=True)
+        return result
+
+    def _fetch_event(
+        self, config: Dict, fields, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """预告/快报按报告期。增减持按日期区间翻页，单日只用于增量预告。"""
+        spec = event_spec(str(config.get("api_name") or ""))
+        field_list = self._as_field_list(fields) or list(spec.tushare_fields())
+        getter = getattr(self.pro, spec.api_name, None)
+        if getter is None:
+            raise RuntimeError(f"{spec.api_name} 不可用")
+        mode = str(config.get("fetch_mode") or spec.fetch).lower()
+        pause = float(config.get("pause_seconds", spec.pause))
+        if mode == "range":
+            start = start_date
+            if spec.earliest and (not start or start < spec.earliest):
+                start = spec.earliest
+            return self._fetch_event_ranges(
+                getter,
+                field_list,
+                start,
+                end_date,
+                spec.chunk_days,
+                spec.min_interval,
+                spec.page_rows,
+                spec.table,
+            )
+        if mode == "day":
+            start = start_date
+            if spec.earliest and (not start or start < spec.earliest):
+                start = spec.earliest
+            return self._fetch_event_days(
+                getter,
+                spec.day_param,
+                field_list,
+                start,
+                end_date,
+                pause,
+                spec.page_rows,
+                spec.table,
+            )
+        if mode != "period":
+            raise ValueError(f"{spec.api_name} 不支持的 fetch_mode: {mode}")
+        as_of = min(
+            pd.Timestamp(end_date) if end_date else pd.Timestamp.today(),
+            pd.Timestamp.today(),
+        ).normalize()
+        periods = config.get("periods") or self._quarter_periods(
+            start_date, end_date, as_of=as_of.strftime("%Y-%m-%d")
+        )
+        if not periods:
+            raise ValueError(f"{spec.api_name} 未生成任何报告期，请检查日期范围")
+        print(
+            f"[event] {spec.table} 按报告期拉取 periods={len(periods)}",
+            flush=True,
+        )
+        frames = []
+        progress = tqdm(periods, desc=f"拉取{spec.table}", unit="期")
+        for period in progress:
+            progress.set_postfix_str(str(period))
+            part = self._fetch_event_pages(
+                getter, {"period": period}, field_list, pause, spec.page_rows
+            )
+            if part is not None and not part.empty:
+                frames.append(part)
+                tqdm.write(f"[event] {spec.table} period={period} -> {len(part)} 行")
+            else:
+                tqdm.write(f"[event] {spec.table} period={period} -> 空")
+            if pause > 0:
+                time.sleep(pause)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        print(f"[event] {spec.table} 合计 {len(result)} 行", flush=True)
+        return result
+
+    def _fetch_event_page(
+        self, getter: Callable, paras: Dict, fields: Optional[List[str]]
+    ) -> pd.DataFrame:
+        """单页拉取。分钟、小时、日额度都等待后重试，不中断这次回补。"""
+        last_error = None
+        ordinary_attempts = 0
+        rate_waits = 0
+        while ordinary_attempts < 6:
+            try:
+                result = getter(**paras, fields=fields)
+                return result if result is not None else pd.DataFrame()
+            except _EventWindowTruncated:
+                raise
+            except Exception as exc:
+                last_error = exc
+                text = _tushare_error_text(exc)
+                if _is_offset_ceiling(text):
+                    raise _EventWindowTruncated(
+                        f"{paras} offset 超过 {_EVENT_OFFSET_LIMIT}，需要缩小日期区间"
+                    ) from exc
+                if _is_rate_limit_error(exc):
+                    if rate_waits >= 40:
+                        raise RuntimeError(
+                            f"{paras} 频率超限，已等待 {rate_waits} 次: {text}"
+                        ) from exc
+                    seconds = _event_rate_wait_seconds(text)
+                    print(
+                        f"[event] 频率超限，等待 {seconds / 60:.0f} 分钟后重试 "
+                        f"paras={paras}",
+                        flush=True,
+                    )
+                    time.sleep(seconds)
+                    rate_waits += 1
+                    continue
+                if _is_non_retryable_tushare_error(exc):
+                    raise
+                ordinary_attempts += 1
+                time.sleep(1)
+        raise RuntimeError(
+            f"Tushare 事件接口失败 paras={paras}: {last_error}"
+        ) from last_error
+
+    def _fetch_event_pages(
+        self,
+        getter: Callable,
+        paras: Dict,
+        fields: Optional[List[str]],
+        pause: float,
+        page_rows: int,
+    ) -> pd.DataFrame:
+        """只有顶满单次上限才翻页。下一页为空表示这个区间已经取完。"""
+        frames = []
+        offset = 0
+        seen = set()
+        while True:
+            current = dict(paras)
+            if offset:
+                current["offset"] = offset
+            part = self._fetch_event_page(getter, current, fields)
+            if part is None or part.empty:
+                break
+            marker = tuple(part.iloc[0].astype(str).tolist())
+            if marker in seen:
+                raise _EventWindowTruncated(f"{paras} 翻页返回了重复记录")
+            seen.add(marker)
+            frames.append(part)
+            if len(part) < page_rows:
+                break
+            offset += len(part)
+            if offset > _EVENT_OFFSET_LIMIT:
+                raise _EventWindowTruncated(
+                    f"{paras} 下一页 offset={offset} 超过 {_EVENT_OFFSET_LIMIT}"
+                )
+            if pause > 0:
+                time.sleep(pause)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def _fetch_event_ranges(
+        self,
+        getter: Callable,
+        field_list: List[str],
+        start_date: str,
+        end_date: str,
+        chunk_days: int,
+        min_interval: float,
+        page_rows: int,
+        label: str,
+    ) -> pd.DataFrame:
+        """按日期区间取，区间内用 offset 翻满页。超过 offset 上限时把区间拆开。"""
+        if not start_date or not end_date:
+            raise ValueError(f"{label} 按区间拉取需要 start_date/end_date")
+        today = pd.Timestamp.today().normalize()
+        start = pd.Timestamp(start_date).normalize()
+        end = min(pd.Timestamp(end_date).normalize(), today)
+        if start > end:
+            return pd.DataFrame()
+        width = max(int(chunk_days), 1)
+        print(
+            f"[event] {label} 按区间拉取 {start.strftime('%Y%m%d')}->{end.strftime('%Y%m%d')} "
+            f"chunk={width} 页宽={page_rows} 间隔={min_interval:.0f}s",
+            flush=True,
+        )
+        frames = []
+        cursor = start
+        first = True
+
+        def _pull(span_start: pd.Timestamp, span_end: pd.Timestamp) -> pd.DataFrame:
+            nonlocal first
+            if not first and min_interval > 0:
+                time.sleep(min_interval)
+            first = False
+            paras = {
+                "start_date": span_start.strftime("%Y%m%d"),
+                "end_date": span_end.strftime("%Y%m%d"),
+            }
+            try:
+                part = self._fetch_event_pages(
+                    getter, paras, field_list, min_interval, page_rows
+                )
+            except _EventWindowTruncated:
+                if span_start >= span_end:
+                    raise RuntimeError(
+                        f"{label} {paras['start_date']} 单日仍被截断，拒绝写入残缺区间"
+                    ) from None
+                mid = span_start + (span_end - span_start) / 2
+                mid = pd.Timestamp(mid).normalize()
+                if mid >= span_end:
+                    mid = span_end - pd.Timedelta(days=1)
+                print(
+                    f"[event] {label} {paras['start_date']}->{paras['end_date']} "
+                    f"翻页到顶，拆成 {span_start.strftime('%Y%m%d')}->{mid.strftime('%Y%m%d')}",
+                    flush=True,
+                )
+                left = _pull(span_start, mid)
+                right = _pull(mid + pd.Timedelta(days=1), span_end)
+                pieces = [frame for frame in (left, right) if frame is not None and not frame.empty]
+                if not pieces:
+                    return pd.DataFrame()
+                return pd.concat(pieces, ignore_index=True)
+            rows = 0 if part is None or part.empty else len(part)
+            print(
+                f"[event] {label} {paras['start_date']}->{paras['end_date']} -> {rows} 行",
+                flush=True,
+            )
+            return part if rows else pd.DataFrame()
+
+        while cursor <= end:
+            chunk_end = min(cursor + pd.Timedelta(days=width - 1), end)
+            part = _pull(cursor, chunk_end)
+            if part is not None and not part.empty:
+                frames.append(part)
+            cursor = chunk_end + pd.Timedelta(days=1)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        print(f"[event] {label} 合计 {len(result)} 行", flush=True)
+        return result
+
+    def _fetch_event_days(
+        self,
+        getter: Callable,
+        param_name: str,
+        field_list: List[str],
+        start_date: str,
+        end_date: str,
+        pause: float,
+        page_rows: int,
+        label: str,
+    ) -> pd.DataFrame:
+        if not start_date or not end_date:
+            raise ValueError(f"{label} 按日拉取需要 start_date/end_date")
+        today = pd.Timestamp.today().normalize()
+        start = pd.Timestamp(start_date).normalize()
+        end = min(pd.Timestamp(end_date).normalize(), today)
+        if start > end:
+            return pd.DataFrame()
+        days = pd.date_range(start, end, freq="D")
+        print(
+            f"[event] {label} 按日拉取 days={len(days)} "
+            f"{start.strftime('%Y%m%d')}->{end.strftime('%Y%m%d')}",
+            flush=True,
+        )
+        frames = []
+        progress = tqdm(days, desc=f"拉取{label}", unit="日")
+        for day in progress:
+            stamp = day.strftime("%Y%m%d")
+            progress.set_postfix_str(stamp)
+            part = self._fetch_event_pages(
+                getter, {param_name: stamp}, field_list, pause, page_rows
+            )
+            if part is not None and not part.empty:
+                frames.append(part)
+                tqdm.write(f"[event] {label} {param_name}={stamp} -> {len(part)} 行")
+            if pause > 0:
+                time.sleep(pause)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        print(f"[event] {label} 合计 {len(result)} 行", flush=True)
         return result
 
     def _fetch_fina_indicator(

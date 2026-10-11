@@ -19,6 +19,7 @@ _SIDECAR_TYPES = {
     "index_constituent",
     "etf",
     "etf_info",
+    "event",
 }
 
 

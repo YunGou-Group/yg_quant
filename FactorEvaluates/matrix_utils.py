@@ -12,24 +12,120 @@ import pandas as pd
 from .context import BatchEvalContext, EvalContext
 from .metric_result import MetricResult
 
+try:
+    from numba import njit as _njit
+    from numba import prange as _prange
+except ImportError:  # pragma: no cover
+    _njit = None
+    _prange = range
+
+
+def _rank_cols_average_pd(arr: np.ndarray) -> np.ndarray:
+    """pandas DataFrame.rank，口径与按列 Series.rank(method='average') 相同。"""
+    work = np.where(np.isfinite(arr), arr, np.nan)
+    out = pd.DataFrame(work).rank(axis=0, method="average").to_numpy(dtype=np.float64)
+    counts = np.isfinite(work).sum(axis=0)
+    if out.shape[1]:
+        out[:, counts < 2] = np.nan
+    return out
+
+
+if _njit is not None:
+
+    @_njit(cache=True)
+    def _rank_cols_average_nb(arr: np.ndarray) -> np.ndarray:
+        n, p = arr.shape
+        out = np.full((n, p), np.nan)
+        if n < 2 or p < 1:
+            return out
+        vals = np.empty(n, dtype=np.float64)
+        idxs = np.empty(n, dtype=np.int64)
+        for j in range(p):
+            m = 0
+            for i in range(n):
+                v = arr[i, j]
+                if np.isfinite(v):
+                    vals[m] = v
+                    idxs[m] = i
+                    m += 1
+            if m < 2:
+                continue
+            order = np.argsort(vals[:m])
+            start = 0
+            while start < m:
+                end = start
+                v0 = vals[order[start]]
+                while end + 1 < m and vals[order[end + 1]] == v0:
+                    end += 1
+                avg = 0.5 * (start + end + 2)
+                for k in range(start, end + 1):
+                    out[idxs[order[k]], j] = avg
+                start = end + 1
+        return out
+
+    @_njit(cache=True, parallel=True)
+    def _rank_cube_masked_nb(
+        cube: np.ndarray,
+        mask: np.ndarray,
+        min_obs: int,
+        stride: int,
+    ) -> np.ndarray:
+        t_n, n, f = cube.shape
+        out = np.full((t_n, n, f), np.nan)
+        n_steps = (t_n + stride - 1) // stride
+        for ti in _prange(n_steps):
+            t = ti * stride
+            n_row = 0
+            for i in range(n):
+                if mask[t, i]:
+                    n_row += 1
+            if n_row < min_obs:
+                continue
+            vals = np.empty(n, dtype=np.float64)
+            idxs = np.empty(n, dtype=np.int64)
+            for j in range(f):
+                m = 0
+                for i in range(n):
+                    if mask[t, i]:
+                        v = cube[t, i, j]
+                        if np.isfinite(v):
+                            vals[m] = float(v)
+                            idxs[m] = i
+                            m += 1
+                if m < 2:
+                    continue
+                order = np.argsort(vals[:m])
+                start = 0
+                while start < m:
+                    end = start
+                    v0 = vals[order[start]]
+                    while end + 1 < m and vals[order[end + 1]] == v0:
+                        end += 1
+                    avg = 0.5 * (start + end + 2)
+                    for k in range(start, end + 1):
+                        out[t, idxs[order[k]], j] = avg
+                    start = end + 1
+        return out
+
+else:
+    _rank_cols_average_nb = None
+    _rank_cube_masked_nb = None
+
 
 def rank_cols(values: np.ndarray) -> np.ndarray:
-    """列内秩，平均处理并列。NaN 保持 NaN。"""
+    """列内秩，平均处理并列。NaN / Inf 保持 NaN；有效数 < 2 的列全为 NaN。"""
     arr = np.asarray(values, dtype=np.float64)
     if arr.ndim == 1:
         arr = arr[:, None]
         squeeze = True
     else:
         squeeze = False
-    n, p = arr.shape
-    out = np.full((n, p), np.nan, dtype=np.float64)
-    for j in range(p):
-        col = arr[:, j]
-        valid = np.isfinite(col)
-        m = int(valid.sum())
-        if m < 2:
-            continue
-        out[valid, j] = pd.Series(col[valid]).rank(method="average").to_numpy(dtype=np.float64)
+    if arr.size == 0:
+        return arr[:, 0] if squeeze else arr.copy()
+    if _rank_cols_average_nb is not None:
+        out = _rank_cols_average_nb(np.ascontiguousarray(arr))
+    else:
+        out = _rank_cols_average_pd(arr)
     return out[:, 0] if squeeze else out
 
 
@@ -59,12 +155,43 @@ def rank_cols_ordinal(values: np.ndarray) -> np.ndarray:
 
 def rank_1d_average(values: np.ndarray) -> np.ndarray:
     """一维平均秩；非有限位置保持 NaN。"""
-    r = np.asarray(values, dtype=np.float64).reshape(-1)
-    out = np.full(r.shape, np.nan, dtype=np.float64)
-    valid = np.isfinite(r)
-    if int(valid.sum()) < 2:
-        return out
-    out[valid] = pd.Series(r[valid]).rank(method="average").to_numpy(dtype=np.float64)
+    return rank_cols(np.asarray(values, dtype=np.float64).reshape(-1))
+
+
+def rank_cube_masked(
+    cube: np.ndarray,
+    mask: np.ndarray,
+    *,
+    min_obs: int = 10,
+    stride: int = 1,
+) -> np.ndarray:
+    """对 (日期, 股票, 因子) cube 做截面平均秩。
+
+    只在 ``mask[t]`` 为 True 的股票上排名，与 ``rank_cols(cube[t, mask[t]])`` 一致。
+    有效股票数 < min_obs 的日期整段为 NaN。``stride`` 只计算抽样日。
+    """
+    cube_a = np.asarray(cube)
+    mask_a = np.asarray(mask, dtype=bool)
+    if cube_a.ndim != 3:
+        raise ValueError("cube 必须是 (T, N, F)")
+    if mask_a.shape != cube_a.shape[:2]:
+        raise ValueError("mask 形状必须是 (T, N)")
+    stride = max(1, int(stride))
+    min_obs = int(min_obs)
+    if _rank_cube_masked_nb is not None:
+        return _rank_cube_masked_nb(
+            np.ascontiguousarray(cube_a),
+            np.ascontiguousarray(mask_a),
+            min_obs,
+            stride,
+        )
+    t_n, _n, _f = cube_a.shape
+    out = np.full(cube_a.shape, np.nan, dtype=np.float64)
+    for t in range(0, t_n, stride):
+        row = mask_a[t]
+        if int(row.sum()) < min_obs:
+            continue
+        out[t, row, :] = rank_cols(np.asarray(cube_a[t, row, :], dtype=np.float64))
     return out
 
 
@@ -301,16 +428,16 @@ def spearman_corr_matrix(factors: np.ndarray, min_obs: int = 20) -> np.ndarray:
     return out
 
 
-def spearman_cross_corr(
-    left: np.ndarray, right: np.ndarray, min_obs: int = 20
+def spearman_from_ranks(
+    left_ranks: np.ndarray, right_ranks: np.ndarray, min_obs: int = 20
 ) -> np.ndarray:
-    """left (n_stocks, p) 与 right (n_stocks, q) 的截面 Spearman 交叉块。
-
-    排名口径与 ``spearman_corr_matrix`` 一致（各列在自身有效集上排名），
-    这样批内对角块与跨批非对角块可以直接拼成同一张相关矩阵。
-    """
-    ra = rank_cols(np.asarray(left, dtype=np.float64))
-    rb = rank_cols(np.asarray(right, dtype=np.float64))
+    """已排名矩阵的 Spearman 交叉块，口径与 ``spearman_cross_corr`` 相同。"""
+    ra = np.asarray(left_ranks, dtype=np.float64)
+    rb = np.asarray(right_ranks, dtype=np.float64)
+    if ra.ndim == 1:
+        ra = ra[:, None]
+    if rb.ndim == 1:
+        rb = rb[:, None]
     ok_a = np.isfinite(ra)
     ok_b = np.isfinite(rb)
     na = ok_a.sum(axis=0)
@@ -325,6 +452,51 @@ def spearman_cross_corr(
         corr = np.where(den > 0, gram / den, np.nan)
     enough = (na[:, None] >= min_obs) & (nb[None, :] >= min_obs)
     return np.where(enough, corr, np.nan)
+
+
+def spearman_cross_corr(
+    left: np.ndarray, right: np.ndarray, min_obs: int = 20
+) -> np.ndarray:
+    """left (n_stocks, p) 与 right (n_stocks, q) 的截面 Spearman 交叉块。
+
+    排名口径与 ``spearman_corr_matrix`` 一致（各列在自身有效集上排名），
+    这样批内对角块与跨批非对角块可以直接拼成同一张相关矩阵。
+    """
+    return spearman_from_ranks(
+        rank_cols(np.asarray(left, dtype=np.float64)),
+        rank_cols(np.asarray(right, dtype=np.float64)),
+        min_obs=min_obs,
+    )
+
+
+def accumulate_spearman_cross_corr(
+    left_ranks: np.ndarray,
+    right_ranks: np.ndarray,
+    mask: np.ndarray,
+    *,
+    min_obs: int = 20,
+    stride: int = 1,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """对已排名 cube 按日累加 Spearman 交叉块及有效天数。"""
+    ra = np.asarray(left_ranks)
+    rb = np.asarray(right_ranks)
+    mask_a = np.asarray(mask, dtype=bool)
+    stride = max(1, int(stride))
+    min_obs = int(min_obs)
+    p = int(ra.shape[2])
+    q = int(rb.shape[2])
+    block = np.zeros((p, q), dtype=np.float64)
+    block_n = np.zeros((p, q), dtype=np.float64)
+    t_n = int(ra.shape[0])
+    for t in range(0, t_n, stride):
+        row = mask_a[t]
+        if int(row.sum()) < min_obs:
+            continue
+        corr = spearman_from_ranks(ra[t, row], rb[t, row], min_obs=min_obs)
+        finite = np.isfinite(corr)
+        np.add(block, corr, out=block, where=finite)
+        block_n += finite
+    return block, block_n
 
 
 def nan_cumsum(values: np.ndarray) -> np.ndarray:
@@ -494,16 +666,24 @@ def apply_daily_matrix(metric, ctx: EvalContext, params: Mapping) -> Dict[str, p
     n_dates = values.shape[0]
     buckets: Dict[str, list] = {}
     style_raw = ctx.intermediates.get("style_raw")
-    from .exposure_engine import RAW_STYLE_NAMES
+    from .exposure_engine import RAW_STYLE_NAMES, SIZE_NAME, standardize_raw_styles
 
     size_panel = style_raw.get("style_size") if isinstance(style_raw, Mapping) else None
+    try:
+        size_col = list(RAW_STYLE_NAMES).index(SIZE_NAME)
+    except ValueError:
+        size_col = 0
     for i in range(n_dates):
         mask = mask_arr[i] if mask_arr is not None else np.ones(values.shape[1], dtype=bool)
         mask = np.asarray(mask, dtype=bool)
         barra = None
         size = None
         if isinstance(style_raw, Mapping):
-            barra = barra_row(ctx, i, RAW_STYLE_NAMES)
+            raw_barra = barra_row(ctx, i, RAW_STYLE_NAMES)
+            if raw_barra is not None:
+                barra = np.full(raw_barra.shape, np.nan, dtype=np.float64)
+                if mask.any():
+                    barra[mask] = standardize_raw_styles(raw_barra[mask], size_col=size_col)
         if size_panel is not None:
             size = size_panel.reindex(index=factor.index, columns=factor.columns).to_numpy(dtype=np.float64)[i]
         batch = BatchEvalContext(

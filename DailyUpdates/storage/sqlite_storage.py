@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .etf_schema import ETF_BASIC_COLUMNS
+from .event_schema import EVENT_BY_API, EventTable, event_spec
 from .financial_schema import FINANCIAL_KEY_COLUMNS, FINANCIAL_VALUE_FIELDS
 
 
@@ -196,6 +197,7 @@ class SQLiteStorage:
             )
             self._migrate_financial_indicator(connection)
             self._ensure_financial_columns(connection)
+            self._ensure_event_tables(connection)
             self._ensure_stock_basic_columns(connection)
             self._migrate_stock_basic_symbols(connection)
 
@@ -235,6 +237,11 @@ class SQLiteStorage:
             connection.execute(
                 f'ALTER TABLE financial_indicator ADD COLUMN "{field}" REAL'
             )
+
+    def _ensure_event_tables(self, connection: sqlite3.Connection) -> None:
+        connection.execute("DROP TABLE IF EXISTS analyst_forecast")
+        for spec in EVENT_BY_API.values():
+            connection.executescript(spec.create_sql())
 
     def _ensure_stock_basic_columns(self, connection: sqlite3.Connection) -> None:
         existing = {
@@ -1170,6 +1177,155 @@ class SQLiteStorage:
     def clear_financial_indicator(self) -> None:
         with self._connect() as connection:
             connection.execute("DELETE FROM financial_indicator")
+
+    def replace_event(self, api_name: str, data: pd.DataFrame) -> int:
+        spec = event_spec(api_name)
+        prepared = self._prepare_event(spec, data)
+        if prepared is None:
+            return 0
+        columns, rows = prepared
+        quoted = ", ".join(f'"{column}"' for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        with self._connect() as connection:
+            self._ensure_event_tables(connection)
+            connection.execute(f"DELETE FROM {spec.table}")
+            connection.executemany(
+                f"INSERT INTO {spec.table} ({quoted}) VALUES ({placeholders})",
+                rows,
+            )
+        return len(rows)
+
+    def upsert_event(self, api_name: str, data: pd.DataFrame) -> int:
+        spec = event_spec(api_name)
+        prepared = self._prepare_event(spec, data)
+        if prepared is None:
+            return 0
+        columns, rows = prepared
+        quoted = ", ".join(f'"{column}"' for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        key = set(spec.primary_key)
+        updates = ", ".join(
+            f'"{field}" = excluded."{field}"' for field in columns if field not in key
+        )
+        conflict = ", ".join(spec.primary_key)
+        action = f"DO UPDATE SET {updates}" if updates else "DO NOTHING"
+        sql = (
+            f"INSERT INTO {spec.table} ({quoted}) VALUES ({placeholders}) "
+            f"ON CONFLICT({conflict}) {action}"
+        )
+        with self._connect() as connection:
+            self._ensure_event_tables(connection)
+            connection.executemany(sql, rows)
+        return len(rows)
+
+    def latest_event_date(self, api_name: str) -> Optional[str]:
+        spec = event_spec(api_name)
+        cursor = self._validate_identifier(spec.cursor)
+        with self._connect() as connection:
+            self._ensure_event_tables(connection)
+            row = connection.execute(
+                f"SELECT MAX({cursor}) AS latest FROM {spec.table} "
+                f"WHERE {cursor} IS NOT NULL AND {cursor} != ''"
+            ).fetchone()
+            return row["latest"] if row and row["latest"] else None
+
+    def clear_event(self, api_name: str) -> None:
+        spec = event_spec(api_name)
+        with self._connect() as connection:
+            self._ensure_event_tables(connection)
+            connection.execute(f"DELETE FROM {spec.table}")
+
+    def read_event(
+        self,
+        api_name: str,
+        symbols: Optional[Sequence[str]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        spec = event_spec(api_name)
+        cursor = self._validate_identifier(spec.cursor)
+        columns = [column.name for column in spec.columns]
+        quoted = ", ".join(f'"{column}"' for column in columns)
+        clauses = []
+        params: List[str] = []
+        if symbols:
+            placeholders = ", ".join("?" for _ in symbols)
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(str(symbol) for symbol in symbols)
+        if start_date:
+            clauses.append(f"{cursor} >= ?")
+            params.append(self._date_string(start_date))
+        if end_date:
+            clauses.append(f"{cursor} <= ?")
+            params.append(self._date_string(end_date))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT {quoted} FROM {spec.table}{where} ORDER BY {cursor}, symbol"
+        with self._connect() as connection:
+            self._ensure_event_tables(connection)
+            return pd.read_sql_query(sql, connection, params=params)
+
+    def _prepare_event(self, spec: EventTable, data: pd.DataFrame):
+        if data is None or data.empty:
+            return None
+        frame = data.copy()
+        rename = {
+            column.source: column.name
+            for column in spec.columns
+            if column.source != column.name and column.source in frame.columns
+        }
+        if rename:
+            frame = frame.rename(columns=rename)
+        columns = [column.name for column in spec.columns]
+        for column in spec.columns:
+            if column.name not in frame.columns:
+                frame[column.name] = None
+            if column.kind == "symbol":
+                frame[column.name] = frame[column.name].map(
+                    lambda value: (
+                        ""
+                        if pd.isna(value) or value is None
+                        else self._normalize_symbol(str(value))
+                    )
+                )
+            elif column.kind == "date":
+                frame[column.name] = frame[column.name].map(
+                    lambda value: (
+                        ""
+                        if pd.isna(value) or value is None or str(value).strip() == ""
+                        else self._date_string(value)
+                    )
+                )
+            elif column.kind == "text":
+                frame[column.name] = (
+                    frame[column.name]
+                    .fillna("")
+                    .astype(str)
+                    .replace({"nan": "", "None": ""})
+                    .map(lambda value: value.strip())
+                )
+            else:
+                frame[column.name] = pd.to_numeric(frame[column.name], errors="coerce")
+        required_dates = [
+            column.name
+            for column in spec.columns
+            if column.key
+            and column.kind == "date"
+            and column.name in {spec.cursor, "end_date"}
+        ]
+        for name in required_dates:
+            frame = frame[frame[name].astype(str).str.len() > 0]
+        if "change_vol" in spec.primary_key:
+            frame = frame[frame["change_vol"].notna()]
+        frame = frame.dropna(subset=["symbol"]).copy()
+        frame = frame[frame["symbol"].astype(str).str.len() > 0]
+        frame = frame.drop_duplicates(list(spec.primary_key), keep="last")
+        if frame.empty:
+            return None
+        rows = [
+            tuple(self._database_value(value) for value in row)
+            for row in frame[columns].itertuples(index=False, name=None)
+        ]
+        return columns, rows
 
     def read_financial_indicator(
         self,

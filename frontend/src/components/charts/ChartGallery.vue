@@ -42,7 +42,7 @@ function showAny(ids) {
     <MonotonicityChart v-if="show('monotonicity')" :series="series" />
     <ConsistencyChart v-if="show('consistency')" :series="series" />
     <PnlChart v-if="show('pnl')" :series="series" />
-    <SizeStratChart v-if="show('size_strat')" :series="series" />
+    <SizeStratChart v-if="show('size_strat')" :series="series" :horizon="horizon" />
     <CrowdingChart v-if="show('crowding')" :series="series" />
     <TailCharts v-if="show('tail')" :series="series" />
     <QualityChart v-if="showAny(['quality', 'factor_stats', 'factor_autocorr'])" :series="series" />

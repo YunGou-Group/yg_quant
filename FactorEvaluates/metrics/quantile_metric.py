@@ -49,18 +49,18 @@ def _ensure_labels(batch_ctx: BatchEvalContext, n_q: int) -> np.ndarray:
 
 
 def _group_mean(values: np.ndarray, labels: np.ndarray, qi: int, min_count: int) -> np.ndarray:
-    p = labels.shape[1] if labels.ndim == 2 else 1
-    if labels.ndim == 1:
-        labels = labels[:, None]
-        values = values[:, None] if values.ndim == 1 else values
-    out = np.full(p, np.nan, dtype=np.float64)
-    if values.ndim == 1:
-        values = np.broadcast_to(values[:, None], labels.shape)
-    for j in range(p):
-        sel = (labels[:, j] == qi) & np.isfinite(values[:, j])
-        if int(sel.sum()) < min_count:
-            continue
-        out[j] = float(np.mean(values[sel, j]))
+    lab = np.asarray(labels)
+    if lab.ndim == 1:
+        lab = lab[:, None]
+    val = np.asarray(values, dtype=np.float64)
+    if val.ndim == 1:
+        val = np.broadcast_to(val[:, None], lab.shape)
+    sel = (lab == int(qi)) & np.isfinite(val)
+    count = sel.sum(axis=0)
+    total = np.where(sel, val, 0.0).sum(axis=0)
+    out = np.full(lab.shape[1], np.nan, dtype=np.float64)
+    ok = count >= int(min_count)
+    np.divide(total, count, out=out, where=ok)
     return out
 
 

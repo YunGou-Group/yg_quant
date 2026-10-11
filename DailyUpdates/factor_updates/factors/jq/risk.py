@@ -11,12 +11,14 @@ _DEPS = ("close",)
 
 SPECS = (
     ("risk_Variance20", "variance20", "20日年化收益方差", 80, _DEPS),
-    ("risk_Variance60", "variance60", "60日年化收益方差", 180, _DEPS),
     ("risk_Skewness20", "skewness20", "20日收益偏度", 80, _DEPS),
     ("risk_Skewness60", "skewness60", "60日收益偏度", 180, _DEPS),
     ("risk_Kurtosis20", "kurtosis20", "20日收益峰度", 80, _DEPS),
     ("risk_sharpe_ratio_20", "sharpe20", "20日夏普（Rf=4%）", 80, _DEPS),
     ("risk_sharpe_ratio_60", "sharpe60", "60日夏普（Rf=4%）", 180, _DEPS),
+    ("risk_Kurtosis60", "kurtosis60", "60日收益峰度", 180, _DEPS),
+    ("risk_Skewness120", "skewness120", "120日收益偏度", 400, _DEPS),
+    ("risk_Kurtosis120", "kurtosis120", "120日收益峰度", 400, _DEPS),
 )
 
 install(globals(), __name__, SPECS, extract_price)

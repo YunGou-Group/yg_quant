@@ -32,7 +32,7 @@ _BTOP = "style_btop"
 class FactorCrowdingMetric(BaseMetric):
     name = "factor_crowding"
     dimension = "暴露度"
-    description = "低分端减高分端的 B/P 差（估值拥挤）以及两端收益方差的合并尺度"
+    description = "低分端减高分端的标准化 B/P 差（估值拥挤）以及两端收益方差的合并尺度"
     cost = "panel"
     produces = ()
     requires = ()

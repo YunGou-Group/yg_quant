@@ -27,6 +27,7 @@ from DailyUpdates.storage.etf_schema import (
     ETF_TUSHARE_BASIC_FIELDS,
     ETF_TUSHARE_DAILY_FIELDS,
 )
+from DailyUpdates.storage.event_schema import event_dataset_configs
 from DailyUpdates.storage.financial_schema import DAILY_BASIC_BARRA_FIELDS, FINANCIAL_TUSHARE_FIELDS
 
 
@@ -355,6 +356,11 @@ def main():
             'fields': list(FINANCIAL_TUSHARE_FIELDS),
             # 同报告期可并存首发/更正两行（update_flag 区分），禁止 keep=last 覆盖
             'primary_key': ['ts_code', 'end_date', 'ann_date', 'update_flag'],
+        },
+        # 业绩预告 / 快报 / 股东增减持。事件表，不进 market_data。
+        **{
+            name: {**cfg, "token": tushare_token}
+            for name, cfg in event_dataset_configs().items()
         },
         # 股票池指数成分（asof，禁止用最新快照回溯）
         'universe_index_weight': {

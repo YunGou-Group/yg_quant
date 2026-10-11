@@ -24,6 +24,22 @@ from .batch.batch_eval_runner import BatchEvalRunner
 from .metric_discoverer import MetricDiscoverer
 
 XT_METRICS: Tuple[str, ...] = ("exposure", "pure_ic", "attribution")
+# 筛因子够用：纯化 IC + Size 暴露 + 分层，避开 dcor / 组内 Spearman / 衰减 / 归因
+SCREEN_METRICS: Tuple[str, ...] = (
+    "rank_ic",
+    "rank_ic_ir",
+    "ic",
+    "ic_ir",
+    "coverage_rate",
+    "quantile",
+    "quantile_returns_after_cost",
+    "factor_style_correlation",
+    "long_short_barra_exposure",
+    "size_stratified_long_short",
+    "factor_corr",
+    "exposure",
+    "pure_ic",
+)
 
 
 def _parse_csv(text: Optional[str]) -> Optional[List[str]]:
@@ -99,7 +115,18 @@ def main() -> None:
     parser.add_argument(
         "--xt",
         action="store_true",
-        help="启用 exposure/pure_ic/attribution 并组装 X_T",
+        help="启用瘦身 X_T（风格+NLSIZE）和 exposure/pure_ic，不含行业与归因",
+    )
+    parser.add_argument(
+        "--xt-full",
+        action="store_true",
+        help="完整 X_T（含申万一级）+ attribution；比 --xt 慢很多",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("full", "screen"),
+        default="full",
+        help="full=全部指标；screen=筛选用精简集（约可压到 5 小时内）",
     )
     parser.add_argument(
         "--overwrite",
@@ -107,20 +134,30 @@ def main() -> None:
         help="允许覆盖已存在的 run_id 目录",
     )
     args = parser.parse_args()
-    xt = bool(args.xt)
+    xt_full = bool(args.xt_full)
+    xt = bool(args.xt) or xt_full or args.profile == "screen"
+    metric_arg = args.metrics
+    if args.profile == "screen" and not metric_arg:
+        metric_arg = ",".join(SCREEN_METRICS)
     metric_names, skipped_xt = resolve_metrics(
-        metrics=args.metrics,
+        metrics=metric_arg,
         exclude=args.exclude_metrics,
         xt=xt,
     )
+    if xt and not xt_full:
+        metric_names = [name for name in metric_names if name != "attribution"]
+        skipped_xt = [name for name in skipped_xt if name != "attribution"]
     xt_running = _xt_in(metric_names)
 
     def progress(phase, detail, pct, message):
         print(f"[batch] {pct:5.0%} {phase} {message}", flush=True)
 
+    if args.profile == "screen":
+        print("[batch] profile=screen：精简指标 + 瘦身 X_T（风格+NLSIZE）", flush=True)
     if xt_running:
+        kind = "完整" if xt_full else "瘦身"
         print(
-            f"[batch] --xt：组装 X_T，计算 {', '.join(xt_running)}",
+            f"[batch] X_T={kind}，计算 {', '.join(xt_running)}",
             flush=True,
         )
     elif xt:
@@ -154,6 +191,8 @@ def main() -> None:
         "overwrite": bool(args.overwrite),
         "metrics": metric_names,
         "xt": bool(xt_running),
+        "xt_full": bool(xt_full),
+        "profile": args.profile,
     }
     result = runner.run(request, progress=progress)
     meta = result.get("meta") or {}

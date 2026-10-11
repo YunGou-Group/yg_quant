@@ -148,6 +148,83 @@ def _winsorize_sigma_rows(arr: np.ndarray, sigma: float, min_obs: int = 10) -> n
     return out
 
 
+def transform_style_arrays(
+    raw: Mapping[str, np.ndarray],
+    mask: np.ndarray,
+    *,
+    winsor_sigma: float = 2.5,
+    min_obs: int = 20,
+) -> Dict[str, np.ndarray]:
+    """把入库风格数组做成评估池上的聚宽 z（含 NLSIZE），不铺行业。
+
+    ``raw[name]`` 与 ``mask`` 均为 (日期, 股票)。返回 float64 面板字典。
+    """
+    mask_arr = np.asarray(mask, dtype=bool)
+    if SIZE_NAME not in raw:
+        raise ValueError("transform_style_arrays 需要 style_size")
+    size = np.asarray(raw[SIZE_NAME], dtype=np.float64)
+    if size.shape != mask_arr.shape:
+        raise ValueError(f"style_size {size.shape} 与 mask {mask_arr.shape} 不一致")
+    weights = np.exp(np.clip(size, -40.0, 40.0))
+    weights = np.where(mask_arr & np.isfinite(size), weights, np.nan)
+    out: Dict[str, np.ndarray] = {}
+    ordered: list[str] = []
+    for name in RAW_STYLE_NAMES:
+        frame = raw.get(name)
+        if frame is None:
+            continue
+        arr = np.asarray(frame, dtype=np.float64)
+        if arr.shape != mask_arr.shape:
+            raise ValueError(f"{name} {arr.shape} 与 mask {mask_arr.shape} 不一致")
+        arr = np.where(mask_arr, arr, np.nan)
+        arr = _winsorize_sigma_rows(arr, float(winsor_sigma), min_obs=int(min_obs))
+        out[name] = _jq_standardize(arr, weights, min_obs=int(min_obs))
+        ordered.append(name)
+    if SIZE_NAME not in out:
+        raise ValueError("transform_style_arrays 标准化后没有 style_size")
+    size_z = out[SIZE_NAME]
+    cubed = size_z ** 3
+    nlsize = _residualize_on_one(cubed, size_z, weights)
+    nlsize = np.where(mask_arr, nlsize, np.nan)
+    out[NLSIZE_NAME] = _jq_standardize(nlsize, weights, min_obs=int(min_obs))
+    return out
+
+
+def standardize_raw_styles(
+    raw: np.ndarray,
+    *,
+    size_col: int = 0,
+    winsor_sigma: float = 2.5,
+    min_obs: int = 20,
+) -> np.ndarray:
+    """当日股票池上的聚宽截面标准化，与 ``ExposureEngine.build`` 风格列一致。
+
+    入库 ``style_size`` 仍是 ln(总市值)；其余风格在入库时已合成/正交，但都还没
+    按评估池再标准化。这里对传入的已掩码截面做：2.5σ 去极值，减市值加权均值，
+    除以等权标准差。权重用 ``exp(style_size)``。
+    """
+    arr = np.asarray(raw, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"raw 须为 (股票, 风格)，收到 {arr.shape}")
+    n_stocks, n_styles = arr.shape
+    if n_stocks == 0 or n_styles == 0:
+        return arr.copy()
+    col = int(size_col)
+    if 0 <= col < n_styles:
+        size = arr[:, col]
+        weights = np.exp(np.clip(size, -40.0, 40.0))
+        weights = np.where(np.isfinite(size), weights, np.nan)
+    else:
+        weights = np.ones(n_stocks, dtype=np.float64)
+    weight_row = np.asarray(weights, dtype=np.float64)[None, :]
+    out = np.full((n_stocks, n_styles), np.nan, dtype=np.float64)
+    for j in range(n_styles):
+        panel = np.asarray(arr[:, j], dtype=np.float64)[None, :].copy()
+        panel = _winsorize_sigma_rows(panel, float(winsor_sigma), min_obs=int(min_obs))
+        out[:, j] = _jq_standardize(panel, weight_row, min_obs=int(min_obs))[0]
+    return out
+
+
 def _jq_standardize(arr: np.ndarray, weights: np.ndarray, min_obs: int = 10) -> np.ndarray:
     """聚宽标准化：减去市值加权均值，除以等权标准差。"""
     finite = np.isfinite(arr)

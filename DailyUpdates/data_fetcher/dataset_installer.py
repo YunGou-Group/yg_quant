@@ -15,6 +15,7 @@ from tqdm import tqdm
 from DailyUpdates.data_fetcher.data_fetcher import source_class_for_config
 from DailyUpdates.data_fetcher.data_source_base import FetchSlice
 from DailyUpdates.data_fetcher.preprocessing.market_bars import load_prev_adj
+from DailyUpdates.storage.event_schema import event_spec
 
 SIDECAR_DATA_TYPES = {
     "industry",
@@ -23,6 +24,7 @@ SIDECAR_DATA_TYPES = {
     "index_constituent",
     "etf",
     "etf_info",
+    "event",
 }
 _TRUNCATED_BY_DATE_APIS = {"stk_limit", "daily_basic", "adj_factor"}
 
@@ -321,6 +323,14 @@ class DatasetInstaller:
             # 新加入 index_list 但库里还没有的指数，由 _write_sidecar_dataset 单独全量回填。
             return "incremental", latest.replace("-", "")
 
+        if data_type == "event":
+            latest = self.storage.latest_event_date(api_name)
+            if not latest:
+                return "full", None
+            # 表里已有数据时，安装重入只补最近公告，避免把快报整表再拉一遍。
+            start = (pd.Timestamp(latest) - pd.Timedelta(days=3)).strftime("%Y%m%d")
+            return "incremental", start
+
         if mode == "full" or always_full_sidecar(dataset_config):
             return "full", None
 
@@ -460,11 +470,20 @@ class DatasetInstaller:
         if write_mode == "incremental" and data_type == "financial":
             fetch_config = dict(dataset_config)
             fetch_config["fetch_mode"] = "ann_date"
+        if data_type == "event":
+            spec = event_spec(api_name)
+            fetch_config = dict(dataset_config)
+            if spec.fetch == "period" and write_mode != "incremental":
+                fetch_config["fetch_mode"] = "period"
+            elif spec.fetch == "period":
+                fetch_config["fetch_mode"] = "day"
+            else:
+                fetch_config["fetch_mode"] = spec.fetch
         logger.info(
             f"{'全量' if write_mode == 'full' else '增量'}更新 sidecar "
             f"{dataset_name}: type={data_type}, api={api_name}, "
             f"range={start}->{end}"
-            f"{' by=ann_date' if fetch_config is not dataset_config else ''}"
+            f"{' by=' + str(fetch_config.get('fetch_mode')) if fetch_config is not dataset_config else ''}"
         )
         try:
             data = self.data_fetcher.fetch_dataset(fetch_config, start, end)
@@ -623,6 +642,11 @@ class DatasetInstaller:
             if write_mode == "full":
                 return self.storage.replace_etf_basic(data)
             return self.storage.upsert_etf_basic(data)
+
+        if data_type == "event":
+            if write_mode == "full":
+                return self.storage.replace_event(api_name, data)
+            return self.storage.upsert_event(api_name, data)
 
         logger.error(
             f"不支持的 sidecar 组合: data_type={data_type}, api={api_name}"

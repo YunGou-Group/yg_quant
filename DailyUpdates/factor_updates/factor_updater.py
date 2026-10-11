@@ -423,14 +423,15 @@ class FactorUpdater:
         active = {factor.get_name() for factor in self.factors}
         stored = set(self.factor_storage.list_stored_factor_names())
         orphans = sorted(stored - active)
-        removed: List[Dict] = []
-        for name in orphans:
-            rows = self.factor_storage.delete_factor_data(name)
-            removed.append({"factor_name": name, "deleted_rows": rows})
-            self.logger.info(f"删除已下线因子: {name} (rows={rows})")
         if not orphans:
             self.logger.info("没有需要删除的下线因子")
-        return removed
+            return []
+        self.logger.info("删除已下线因子 %s 个（bin 删完后写一次 meta）", len(orphans))
+        rows_by_name = self.factor_storage.delete_factors(orphans)
+        return [
+            {"factor_name": name, "deleted_rows": int(rows_by_name.get(name, 0))}
+            for name in orphans
+        ]
 
     def update_factors(
         self,

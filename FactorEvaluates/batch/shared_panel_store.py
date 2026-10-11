@@ -11,7 +11,13 @@ import pandas as pd
 
 from Universes.catalog import build_mask as build_universe_mask
 
-from ..exposure_engine import RAW_STYLE_NAMES, ExposureEngine
+from ..exposure_engine import (
+    NLSIZE_NAME,
+    RAW_STYLE_NAMES,
+    SIZE_NAME,
+    ExposureEngine,
+    transform_style_arrays,
+)
 from ..factor_panel_loader import FactorPanelLoader
 from ..industry_panel import load_l1_code_panel
 from ..market_panel_loader import MarketPanelLoader
@@ -30,6 +36,7 @@ class SharedPanelStore:
         decay_horizons: Sequence[int] = DECAY_HORIZONS,
         load_style: bool = True,
         load_xt: bool = False,
+        xt_full: bool = False,
         factor_loader: Optional[FactorPanelLoader] = None,
         market_loader: Optional[MarketPanelLoader] = None,
         progress=None,
@@ -97,51 +104,92 @@ class SharedPanelStore:
                 self.style[name] = aligned.to_numpy(dtype=np.float32)
                 del aligned
             del loaded
-            if load_xt and "style_size" in self.style:
-                self._say("phase", "x_t", 0.22, "组装 X_T")
-                raw_frames = {
-                    name: pd.DataFrame(arr, index=eval_open.index, columns=eval_open.columns)
-                    for name, arr in self.style.items()
+            raw_style = dict(self.style)
+            if "style_size" in raw_style:
+                self._say("phase", "style_z", 0.2, "股票池上标准化风格（聚宽口径）")
+                z_panels = transform_style_arrays(raw_style, self.mask)
+                self.style = {
+                    name: arr.astype(np.float32, copy=False) for name, arr in z_panels.items()
                 }
-                codes, labels = load_l1_code_panel(
-                    self.market_loader.storage, eval_open.index, eval_open.columns
+                del z_panels
+            if load_xt and "style_size" in raw_style:
+                self._assemble_x_t(
+                    mask_df,
+                    eval_open.index,
+                    eval_open.columns,
+                    raw_style=raw_style if xt_full else None,
+                    full=bool(xt_full),
                 )
-                exposures = ExposureEngine().build(
-                    raw_frames,
-                    mask_df.fillna(False),
-                    industry_codes=codes,
-                    industry_labels=labels,
-                )
-                del raw_frames, codes
-                names = list(exposures.names)
-                stack = [np.ones((len(self.dates), len(self.symbols)), dtype=np.float32)]
-                x_names = ["intercept"]
-                for name in names:
-                    panel = exposures.panels.get(name)
-                    if panel is None:
-                        continue
-                    stack.append(
-                        panel.reindex(index=eval_open.index, columns=eval_open.columns).to_numpy(
-                            dtype=np.float32
-                        )
-                    )
-                    x_names.append(name)
-                self.x_t = np.stack(stack, axis=2)
-                self.x_names = x_names
-                nbytes = int(self.x_t.nbytes)
-                self._say(
-                    "phase",
-                    "x_t_done",
-                    0.23,
-                    f"X_T shape={tuple(self.x_t.shape)} cols={len(self.x_names)} "
-                    f"~{nbytes / (1024 ** 3):.2f}GB",
-                )
-                del exposures, stack
             elif load_xt:
                 self._say("phase", "x_t_skip", 0.22, "需要 X_T 但缺少 style_size，已跳过")
+            del raw_style
         # open 全表只为算远期/股票池服务；numpy 面板建好后丢掉 pandas 缓存
         self.market_loader._field_panels.clear()
         del full_open, eval_open, mask_df
+
+    def _assemble_x_t(
+        self,
+        mask_df: pd.DataFrame,
+        dates,
+        symbols,
+        *,
+        raw_style: Optional[Dict[str, np.ndarray]],
+        full: bool,
+    ) -> None:
+        """slim：截距 + 9 风格 + NLSIZE；full 用入库原料再铺申万一级。"""
+        if full:
+            self._say("phase", "x_t", 0.22, "组装完整 X_T（含行业）")
+            src = raw_style or self.style
+            raw_frames = {
+                name: pd.DataFrame(arr, index=dates, columns=symbols)
+                for name, arr in src.items()
+                if name in RAW_STYLE_NAMES
+            }
+            codes, labels = load_l1_code_panel(self.market_loader.storage, dates, symbols)
+            exposures = ExposureEngine().build(
+                raw_frames,
+                mask_df.fillna(False),
+                industry_codes=codes,
+                industry_labels=labels,
+            )
+            del raw_frames, codes
+            names = list(exposures.names)
+            stack = [np.ones((len(self.dates), len(self.symbols)), dtype=np.float32)]
+            x_names = ["intercept"]
+            for name in names:
+                panel = exposures.panels.get(name)
+                if panel is None:
+                    continue
+                stack.append(
+                    panel.reindex(index=dates, columns=symbols).to_numpy(dtype=np.float32)
+                )
+                x_names.append(name)
+            self.x_t = np.stack(stack, axis=2)
+            self.x_names = x_names
+            del exposures, stack
+        else:
+            self._say("phase", "x_t", 0.22, "组装瘦身 X_T（风格+NLSIZE，不含行业）")
+            stack = [np.ones((len(self.dates), len(self.symbols)), dtype=np.float32)]
+            x_names = ["intercept"]
+            for name in RAW_STYLE_NAMES:
+                arr = self.style.get(name)
+                if arr is None:
+                    continue
+                stack.append(np.asarray(arr, dtype=np.float32))
+                x_names.append(name)
+                if name == SIZE_NAME and NLSIZE_NAME in self.style:
+                    stack.append(np.asarray(self.style[NLSIZE_NAME], dtype=np.float32))
+                    x_names.append(NLSIZE_NAME)
+            self.x_t = np.stack(stack, axis=2)
+            self.x_names = x_names
+        nbytes = int(self.x_t.nbytes)
+        self._say(
+            "phase",
+            "x_t_done",
+            0.23,
+            f"X_T shape={tuple(self.x_t.shape)} cols={len(self.x_names)} "
+            f"~{nbytes / (1024 ** 3):.2f}GB",
+        )
 
     def barra_day(self, date_i: int, row_mask: np.ndarray) -> Optional[np.ndarray]:
         if not self.style:

@@ -7,11 +7,28 @@ CLI 发现另看 name / from_cli / panel_kwargs / run_tag / cli_fields。
 
 from __future__ import annotations
 
+import hashlib
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from .context import DayContext
 from .holdings import TargetHoldings
+
+# 文件名还要加 _YYYYMMDD_HHMMSS_attribution.json；NTFS 单节上限 255
+_RUN_TAG_MAX = 200
+
+
+def shorten_run_tag(tag: str, max_len: int = _RUN_TAG_MAX) -> str:
+    """超长 run tag 保留前缀并接 sha1，避免 Windows 文件名超限。"""
+    text = str(tag or "").strip()
+    limit = max(16, int(max_len))
+    if len(text) <= limit:
+        return text
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    keep = limit - len(digest) - 1
+    if keep < 8:
+        return digest
+    return f"{text[:keep].rstrip('_')}_{digest}"
 
 
 def cli_field(

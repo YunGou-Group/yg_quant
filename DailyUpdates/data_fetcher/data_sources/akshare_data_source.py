@@ -278,6 +278,8 @@ class AkshareDataSource(DataSourceBase):
         data_type = str(config.get("data_type") or "daily")
         api_name = str(config.get("api_name") or data_type)
         fields = config.get("fields")
+        if data_type == "event":
+            raise ValueError(f"Akshare 不提供 {api_name}")
         if data_type == "daily":
             if api_name == "daily":
                 return self._fetch_daily(config, fields, start_date, end_date)

@@ -287,6 +287,9 @@ class UnifiedScheduler:
             elif data_type == "financial":
                 self.storage.clear_financial_indicator()
                 logs.append(f"已清空 financial_indicator ({name})")
+            elif data_type == "event":
+                self.storage.clear_event(api_name)
+                logs.append(f"已清空 {api_name} ({name})")
             elif data_type == "index_constituent":
                 self.storage.clear_index_constituents(
                     old_config.get("index_list")

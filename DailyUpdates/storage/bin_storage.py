@@ -92,17 +92,63 @@ def _axis_lock(root: Path) -> threading.RLock:
         return lock
 
 
+def _win_sharing_violation(exc: BaseException) -> bool:
+    winerr = getattr(exc, "winerror", None)
+    return winerr in (5, 32)
+
+
+def _replace_with_retry(tmp: Path, path: Path, attempts: int = 10) -> None:
+    """Windows 上目标文件常被索引/杀毒短暂锁住，replace 失败就退避重试。"""
+    last: Optional[BaseException] = None
+    for i in range(max(1, attempts)):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last = exc
+        except OSError as exc:
+            if not _win_sharing_violation(exc):
+                raise
+            last = exc
+        time.sleep(0.05 * (2 ** min(i, 6)))
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    assert last is not None
+    raise last
+
+
+def _unlink_with_retry(path: Path, attempts: int = 8) -> None:
+    last: Optional[BaseException] = None
+    for i in range(max(1, attempts)):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as exc:
+            last = exc
+        except OSError as exc:
+            if not _win_sharing_violation(exc):
+                raise
+            last = exc
+        time.sleep(0.05 * (2 ** min(i, 5)))
+    if last is not None:
+        raise last
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """先写同目录临时文件再 os.replace，避免中途崩溃留下截断的轴文件。"""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    _replace_with_retry(tmp, path)
 
 
 def _atomic_write_bytes(path: Path, blob: bytes) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_bytes(blob)
-    os.replace(tmp, path)
+    _replace_with_retry(tmp, path)
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -247,6 +293,11 @@ class BinStorage:
 
     def _discard_stale_parts(self) -> None:
         """启动时丢掉未完成 remap 的 staging 文件。"""
+        for path in self.root.glob("_factor_meta.json.*.tmp"):
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning("无法删除残留 meta tmp: %s", path, exc_info=True)
         if not self.features_dir.is_dir():
             return
         for path in self.features_dir.glob("*/*.day.bin.part"):
@@ -694,16 +745,32 @@ class BinStorage:
             for p in self.features_dir.glob("*/*.day.bin")
             if p.name.endswith(".day.bin")
         }
+        names.update(self._meta)
         return sorted(names)
 
     def delete_factor_data(self, factor_name: str) -> int:
-        meta = self._meta.get(factor_name) or {}
-        rows = int(meta.get("rows") or 0)
-        for path in self.features_dir.glob(f"*/{factor_name}.day.bin"):
-            path.unlink()
-        self._meta.pop(factor_name, None)
-        self._commit_meta(removed=[factor_name])
-        return rows
+        rows_by_name = self.delete_factors([factor_name])
+        return int(rows_by_name.get(factor_name, 0))
+
+    def delete_factors(self, names: Sequence[str]) -> Dict[str, int]:
+        """删 bin 后只写一次 meta，避免 Windows 上连续 replace 同一 json 被锁。"""
+        rows_by_name: Dict[str, int] = {}
+        unique = [str(name) for name in names if str(name)]
+        if not unique:
+            return rows_by_name
+        for factor_name in unique:
+            meta = self._meta.get(factor_name) or {}
+            rows_by_name[factor_name] = int(meta.get("rows") or 0)
+            for path in self.features_dir.glob(f"*/{factor_name}.day.bin"):
+                _unlink_with_retry(path)
+            self._meta.pop(factor_name, None)
+            logger.info(
+                "已删下线因子 bin: %s (rows=%s)",
+                factor_name,
+                rows_by_name[factor_name],
+            )
+        self._commit_meta(removed=unique)
+        return rows_by_name
 
     def read_factor_data(
         self,
