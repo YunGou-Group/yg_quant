@@ -16,6 +16,7 @@ from DailyUpdates.data_fetcher.data_fetcher import source_class_for_config
 from DailyUpdates.data_fetcher.data_source_base import FetchSlice
 from DailyUpdates.data_fetcher.preprocessing.market_bars import load_prev_adj
 from DailyUpdates.storage.event_schema import event_spec
+from DailyUpdates.storage.financial_schema import statement_table_for_api
 
 SIDECAR_DATA_TYPES = {
     "industry",
@@ -349,13 +350,16 @@ class DatasetInstaller:
             # 历史名称表本身很小，且历史行可能被更正，每次整表重拉最省心。
             return "full", None
 
-        if data_type == "financial" and api_name in (
-            "fina_indicator",
-            "fina_indicator_vip",
-        ):
-            latest = self.storage.get_financial_latest_ann_date()
-            if not latest:
-                latest = self.storage.get_financial_latest_end_date()
+        if data_type == "financial":
+            table = statement_table_for_api(api_name)
+            if table:
+                latest = self.storage.get_financial_statement_latest_ann_date(table)
+            elif api_name in ("fina_indicator", "fina_indicator_vip"):
+                latest = self.storage.get_financial_latest_ann_date()
+                if not latest:
+                    latest = self.storage.get_financial_latest_end_date()
+            else:
+                latest = None
             if not latest:
                 return "full", None
             # 从最近公告日往前回 3 个自然日，覆盖 T+1 和周末补丁
@@ -623,13 +627,16 @@ class DatasetInstaller:
                 return self.storage.replace_stock_namechange(data)
             return self.storage.upsert_stock_namechange(data)
 
-        if data_type == "financial" and api_name in (
-            "fina_indicator",
-            "fina_indicator_vip",
-        ):
-            if write_mode == "full":
-                return self.storage.replace_financial_indicator(data)
-            return self.storage.upsert_financial_indicator(data)
+        if data_type == "financial":
+            table = statement_table_for_api(api_name)
+            if table:
+                if write_mode == "full":
+                    return self.storage.replace_financial_statement(table, data)
+                return self.storage.upsert_financial_statement(table, data)
+            if api_name in ("fina_indicator", "fina_indicator_vip"):
+                if write_mode == "full":
+                    return self.storage.replace_financial_indicator(data)
+                return self.storage.upsert_financial_indicator(data)
 
         if data_type == "index_constituent" and api_name == "index_weight":
             if write_mode == "full":

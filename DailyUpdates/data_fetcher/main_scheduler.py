@@ -28,7 +28,12 @@ from DailyUpdates.storage.etf_schema import (
     ETF_TUSHARE_DAILY_FIELDS,
 )
 from DailyUpdates.storage.event_schema import event_dataset_configs
-from DailyUpdates.storage.financial_schema import DAILY_BASIC_BARRA_FIELDS, FINANCIAL_TUSHARE_FIELDS
+from DailyUpdates.storage.financial_schema import (
+    BALANCESHEET_TUSHARE_FIELDS,
+    CASHFLOW_TUSHARE_FIELDS,
+    DAILY_BASIC_BARRA_FIELDS,
+    FINANCIAL_TUSHARE_FIELDS,
+)
 
 
 def main():
@@ -219,6 +224,10 @@ def main():
     #     },
     # }
 
+    # 备用 Ricequant / rqdatac（面板切片，URI 见 RQDATAC_URI 或 doc/config.py）---
+    # dataset_config 把 data_source 改成 'Ricequant'，并加 'uri': os.getenv('RQDATAC_URI')。
+    # 与 Tushare 同一套 api_name。不提供 namechange / 事件表。
+
     # --- 当前启用：Tushare ---
     if not tushare_token:
         raise RuntimeError("请先设置 TUSHARE_TOKEN 环境变量")
@@ -355,6 +364,28 @@ def main():
             'pause_seconds': 1.0,
             'fields': list(FINANCIAL_TUSHARE_FIELDS),
             # 同报告期可并存首发/更正两行（update_flag 区分），禁止 keep=last 覆盖
+            'primary_key': ['ts_code', 'end_date', 'ann_date', 'update_flag'],
+        },
+        # 资产负债表瘦身：其他权益工具、应付账款。https://tushare.pro/document/2?doc_id=36
+        'balancesheet': {
+            'data_source': 'Tushare',
+            'data_type': 'financial',
+            'api_name': 'balancesheet_vip',
+            'token': tushare_token,
+            'use_vip': True,
+            'pause_seconds': 1.0,
+            'fields': list(BALANCESHEET_TUSHARE_FIELDS),
+            'primary_key': ['ts_code', 'end_date', 'ann_date', 'update_flag'],
+        },
+        # 现金流量表瘦身：投资/筹资净额。筹资字段是 n_cash_flows_fnc_act。
+        'cashflow': {
+            'data_source': 'Tushare',
+            'data_type': 'financial',
+            'api_name': 'cashflow_vip',
+            'token': tushare_token,
+            'use_vip': True,
+            'pause_seconds': 1.0,
+            'fields': list(CASHFLOW_TUSHARE_FIELDS),
             'primary_key': ['ts_code', 'end_date', 'ann_date', 'update_flag'],
         },
         # 业绩预告 / 快报 / 股东增减持。事件表，不进 market_data。

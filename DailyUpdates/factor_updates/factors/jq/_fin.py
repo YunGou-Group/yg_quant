@@ -63,6 +63,12 @@ PERCENT_FIELDS: Set[str] = {
 }
 
 
+def is_annual_end(end: object) -> bool:
+    """年报报告期：兼容 20231231 与 2023-12-31。"""
+    digits = "".join(ch for ch in str(end) if ch.isdigit())[:8]
+    return len(digits) == 8 and digits.endswith("1231")
+
+
 def scale_percent_ratio(series: pd.Series) -> pd.Series:
     values = pd.to_numeric(series, errors="coerce")
     sample = values.to_numpy(dtype=np.float64, copy=False)
@@ -315,7 +321,7 @@ class FinEngine:
         if ev.empty:
             return self._empty()
         if annual_only:
-            ev = ev[ev["end_date"].str.endswith("1231")]
+            ev = ev[ev["end_date"].map(is_annual_end)]
         if ev.empty:
             return self._empty()
         ev = ev.copy()
@@ -347,7 +353,7 @@ class FinEngine:
         ev = self._prep_fin_field(field)
         if ev.empty:
             return ev
-        return ev[ev["end_date"].str.endswith("1231")].copy()
+        return ev[ev["end_date"].map(is_annual_end)].copy()
 
     def _roll_annual(
         self, field: str, years: int, min_years: int, reducer

@@ -1,237 +1,320 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""BinStorage 轴一致性：尾部追加、中间插入重映射、并发元数据写入。"""
-
-from __future__ import annotations
-
-import tempfile
-import unittest
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from DailyUpdates.storage import BinStorage
+from DailyUpdates.storage.bin_storage import BinStorage, listed_mask, normalize_symbol
 
 
-def _frame(symbol: str, pairs) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "ts_code": [symbol] * len(pairs),
-            "trade_date": [d for d, _ in pairs],
-            "factor_value": [v for _, v in pairs],
-        }
+def _frame(rows):
+    return pd.DataFrame(rows, columns=["ts_code", "trade_date", "factor_value"])
+
+
+def _store(tmp_path: Path) -> BinStorage:
+    return BinStorage(str(tmp_path / "factors"))
+
+
+def test_normalize_symbol():
+    assert normalize_symbol("000001.SZ") == "SZ000001"
+    assert normalize_symbol("sz000001") == "SZ000001"
+    assert normalize_symbol("SH600000") == "SH600000"
+
+
+def test_roundtrip_wide_panel(tmp_path):
+    store = _store(tmp_path)
+    data = _frame(
+        [
+            ("SZ000001", "2020-01-02", 1.5),
+            ("SH600000", "2020-01-02", 2.5),
+            ("SZ000001", "2020-01-03", 1.75),
+            ("SH600000", "2020-01-03", 2.75),
+        ]
     )
+    written = store.upsert_factor_data("alpha001", data)
+    assert written == 4
+    panel = store.read_factor_panel("alpha001")
+    assert list(panel.index) == ["2020-01-02", "2020-01-03"]
+    assert list(panel.columns) == ["SZ000001", "SH600000"]
+    assert panel.loc["2020-01-02", "SZ000001"] == pytest.approx(1.5)
+    assert panel.loc["2020-01-03", "SH600000"] == pytest.approx(2.75)
 
 
-class BinStorageAxisTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.store = BinStorage(str(Path(self._tmp.name) / "factors"))
+def test_incremental_append_leaves_old_bytes(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "mom",
+        _frame([("SZ000001", "2020-01-02", 1.0), ("SH600000", "2020-01-02", 2.0)]),
+    )
+    f32 = store.features_dir / "mom.f32"
+    before = f32.read_bytes()
+    store.upsert_factor_data(
+        "mom",
+        _frame([("SZ000001", "2020-01-03", 3.0), ("SH600000", "2020-01-03", 4.0)]),
+    )
+    after = f32.read_bytes()
+    assert after[: len(before)] == before
+    panel = store.read_factor_panel("mom")
+    assert panel.loc["2020-01-02", "SZ000001"] == pytest.approx(1.0)
+    assert panel.loc["2020-01-03", "SH600000"] == pytest.approx(4.0)
 
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
 
-    def _series(self, factor: str, symbol: str) -> pd.Series:
-        panel = self.store.read_factor_panel(factor)
-        return panel[symbol].dropna()
-
-    def test_tail_append_keeps_alignment(self):
-        self.store.upsert_factor_data(
-            "f", _frame("SH600000", [("2020-01-02", 1.0), ("2020-01-03", 2.0)])
-        )
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-06", 3.0)]))
-        got = self._series("f", "SH600000")
-        self.assertEqual(
-            list(got.index), ["2020-01-02", "2020-01-03", "2020-01-06"]
-        )
-        np.testing.assert_allclose(got.to_numpy(), [1.0, 2.0, 3.0])
-
-    def test_middle_insertion_remaps_existing_bins(self):
-        """补一个漏掉的历史交易日，不能让之后的值整体错位。"""
-        self.store.upsert_factor_data(
-            "f",
-            _frame(
-                "SH600000",
-                [("2020-01-02", 1.0), ("2020-01-06", 3.0), ("2020-01-07", 4.0)],
-            ),
-        )
-        self.store.upsert_factor_data(
-            "g", _frame("SZ000001", [("2020-01-02", 10.0), ("2020-01-07", 40.0)])
-        )
-
-        # 事后才发现 01-03 也是交易日
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-03", 2.0)]))
-
-        self.assertEqual(
-            self.store.read_calendar(),
-            ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"],
-        )
-        got = self._series("f", "SH600000")
-        self.assertEqual(list(got.index), ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"])
-        np.testing.assert_allclose(got.to_numpy(), [1.0, 2.0, 3.0, 4.0])
-
-        # 没有参与这次写入的因子也必须被一起重排
-        other = self._series("g", "SZ000001")
-        self.assertEqual(list(other.index), ["2020-01-02", "2020-01-07"])
-        np.testing.assert_allclose(other.to_numpy(), [10.0, 40.0])
-
-    def test_leading_insertion_remaps(self):
-        self.store.upsert_factor_data(
-            "f", _frame("SH600000", [("2020-02-03", 5.0), ("2020-02-04", 6.0)])
-        )
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-02", 1.0)]))
-        got = self._series("f", "SH600000")
-        self.assertEqual(list(got.index), ["2020-01-02", "2020-02-03", "2020-02-04"])
-        np.testing.assert_allclose(got.to_numpy(), [1.0, 5.0, 6.0])
-
-    def test_concurrent_meta_writes_keep_every_factor(self):
-        names = [f"f{i:02d}" for i in range(24)]
-
-        def write(name: str) -> None:
-            # 每个线程各建一个 BinStorage，模拟并发因子更新各持一份内存 meta
-            store = BinStorage(str(self.store.root))
-            store.upsert_factor_data(
-                name, _frame("SH600000", [("2020-01-02", 1.0)])
-            )
-
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            list(pool.map(write, names))
-
-        fresh = BinStorage(str(self.store.root))
-        for name in names:
-            self.assertTrue(
-                fresh.is_factor_registered(name), f"{name} 的元数据被并发写入覆盖了"
-            )
-            self.assertEqual(fresh.get_factor_latest_date(name), "2020-01-02")
-
-    def test_delete_removes_meta_entry(self):
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-02", 1.0)]))
-        self.store.upsert_factor_data("g", _frame("SH600000", [("2020-01-02", 2.0)]))
-        self.store.delete_factor_data("f")
-        fresh = BinStorage(str(self.store.root))
-        self.assertFalse(fresh.is_factor_registered("f"))
-        self.assertTrue(fresh.is_factor_registered("g"))
-
-    def test_replace_overwrites_full_series(self):
-        self.store.upsert_factor_data(
-            "f", _frame("SH600000", [("2020-01-02", 1.0), ("2020-01-03", 2.0)])
-        )
-        self.store.upsert_factor_data(
-            "f",
-            _frame("SH600000", [("2020-01-02", 9.0), ("2020-01-03", 8.0)]),
-            replace=True,
-        )
-        got = self._series("f", "SH600000")
-        np.testing.assert_allclose(got.to_numpy(), [9.0, 8.0])
-
-    def test_axis_files_are_never_partially_written(self):
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-02", 1.0)]))
-        leftovers = list(self.store.root.rglob("*.tmp"))
-        self.assertEqual(leftovers, [])
-        self.assertFalse((self.store.root / "_axis.lock").exists())
-
-    def test_mismatch_bin_length_is_rejected(self):
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-02", 1.0)]))
-        path = next(self.store.features_dir.glob("*/f.day.bin"))
-        extra = np.array([2.0], dtype="<f4")
-        with path.open("ab") as handle:
-            handle.write(extra.tobytes())
-        with self.assertRaises(ValueError):
-            self.store.read_factor_panel("f")
-
-    def test_short_bin_reads_as_trailing_nan(self):
-        """增量只写部分股票时，缺席文件读成尾部 NaN，不拒绝整面板。"""
-        self.store.upsert_factor_data(
-            "f",
-            pd.concat(
-                [
-                    _frame("SH600000", [("2020-01-02", 1.0), ("2020-01-03", 2.0)]),
-                    _frame("SZ000001", [("2020-01-02", 10.0), ("2020-01-03", 20.0)]),
-                ],
-                ignore_index=True,
-            ),
-        )
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-06", 3.0)]))
-        panel = self.store.read_factor_panel("f")
-        self.assertEqual(
-            list(panel.index), ["2020-01-02", "2020-01-03", "2020-01-06"]
-        )
-        np.testing.assert_allclose(panel["SH600000"].to_numpy(), [1.0, 2.0, 3.0])
-        np.testing.assert_allclose(panel["SZ000001"].to_numpy(), [10.0, 20.0, np.nan])
-        tail = self.store.read_factor_panel("f", start_date="2020-01-06")
-        self.assertTrue(np.isnan(tail.loc["2020-01-06", "SZ000001"]))
-
-    def test_middle_insert_remaps_short_bins(self):
-        self.store.upsert_factor_data(
-            "f",
-            pd.concat(
-                [
-                    _frame("SH600000", [("2020-01-02", 1.0), ("2020-01-06", 3.0)]),
-                    _frame("SZ000001", [("2020-01-02", 10.0), ("2020-01-06", 30.0)]),
-                ],
-                ignore_index=True,
-            ),
-        )
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-07", 4.0)]))
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-03", 2.0)]))
-        panel = self.store.read_factor_panel("f")
-        self.assertEqual(
-            list(panel.index),
-            ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"],
-        )
-        np.testing.assert_allclose(panel["SH600000"].to_numpy(), [1.0, 2.0, 3.0, 4.0])
-        np.testing.assert_allclose(
-            panel["SZ000001"].to_numpy(), [10.0, np.nan, 30.0, np.nan]
-        )
-
-    def test_align_axis_false_writes_on_existing_calendar(self):
-        self.store.ensure_calendar(["2020-01-02", "2020-01-03"])
-        self.store.upsert_factor_data(
-            "f",
-            _frame("SH600000", [("2020-01-02", 1.0), ("2020-01-03", 2.0)]),
-            align_axis=False,
-        )
-        got = self._series("f", "SH600000")
-        np.testing.assert_allclose(got.to_numpy(), [1.0, 2.0])
-
-    def test_incremental_patch_many_symbols(self):
-        first = pd.concat(
+def test_new_stock_only_widens_new_row(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-02", 1.0)]))
+    f32 = store.features_dir / "f.f32"
+    old = f32.read_bytes()
+    store.upsert_factor_data(
+        "f",
+        _frame(
             [
-                _frame(f"SH{600000 + i}", [("2020-01-02", 1.0), ("2020-01-03", 2.0)])
-                for i in range(48)
-            ],
-            ignore_index=True,
-        )
-        self.store.upsert_factor_data("f", first)
-        extra = pd.concat(
-            [_frame(f"SH{600000 + i}", [("2020-01-06", 3.0)]) for i in range(48)],
-            ignore_index=True,
-        )
-        self.store.upsert_factor_data("f", extra)
-        got = self._series("f", "SH600000")
-        self.assertEqual(list(got.index), ["2020-01-02", "2020-01-03", "2020-01-06"])
-        np.testing.assert_allclose(got.to_numpy(), [1.0, 2.0, 3.0])
-
-    def test_stale_part_files_are_dropped_on_init(self):
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2020-01-02", 1.0)]))
-        path = next(self.store.features_dir.glob("*/f.day.bin"))
-        part = Path(str(path) + ".part")
-        part.write_bytes(b"junk")
-        self.assertTrue(part.exists())
-        BinStorage(str(self.store.root))
-        self.assertFalse(part.exists())
-
-    def test_all_nan_does_not_advance_watermark(self):
-        self.store.upsert_factor_data("f", _frame("SH600000", [("2026-09-01", 1.0)]))
-        self.assertEqual(self.store.get_factor_latest_date("f"), "2026-09-01")
-        rows = self.store.upsert_factor_data(
-            "f", _frame("SH600000", [("2026-09-03", float("nan"))])
-        )
-        self.assertEqual(rows, 0)
-        self.assertEqual(self.store.get_factor_latest_date("f"), "2026-09-01")
+                ("SZ000001", "2020-01-03", 2.0),
+                ("SH600000", "2020-01-03", 9.0),
+            ]
+        ),
+    )
+    assert f32.read_bytes()[: len(old)] == old
+    layout = store._read_layout("f")
+    assert int(layout.indptr[1] - layout.indptr[0]) == 1
+    assert int(layout.indptr[2] - layout.indptr[1]) == 2
+    panel = store.read_factor_panel("f")
+    assert np.isnan(panel.loc["2020-01-02", "SH600000"])
+    assert panel.loc["2020-01-03", "SH600000"] == pytest.approx(9.0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_delist_shortens_later_row(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame(
+            [
+                ("SZ000001", "2020-01-02", 1.0),
+                ("SH600000", "2020-01-02", 2.0),
+                ("SZ000001", "2020-01-03", 3.0),
+                ("SH600000", "2020-01-03", 4.0),
+            ]
+        ),
+    )
+    store.register_delist("SZ000001", "2020-01-06")
+    store.upsert_factor_data(
+        "f",
+        _frame([("SH600000", "2020-01-06", 5.0)]),
+    )
+    layout = store._read_layout("f")
+    assert int(layout.indptr[1] - layout.indptr[0]) == 2
+    assert int(layout.indptr[2] - layout.indptr[1]) == 2
+    assert int(layout.indptr[3] - layout.indptr[2]) == 1
+    panel = store.read_factor_panel("f")
+    assert np.isnan(panel.loc["2020-01-06", "SZ000001"])
+    assert panel.loc["2020-01-06", "SH600000"] == pytest.approx(5.0)
+    long = store.read_factor_data("f", start_date="2020-01-06")
+    assert "SZ000001" not in set(long["ts_code"])
+
+
+def test_suspend_keeps_nan(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame(
+            [
+                ("SZ000001", "2020-01-02", 1.0),
+                ("SH600000", "2020-01-02", 2.0),
+            ]
+        ),
+    )
+    store.upsert_factor_data("f", _frame([("SH600000", "2020-01-03", 3.0)]))
+    panel = store.read_factor_panel("f")
+    assert np.isnan(panel.loc["2020-01-03", "SZ000001"])
+    assert panel.loc["2020-01-03", "SH600000"] == pytest.approx(3.0)
+    layout = store._read_layout("f")
+    assert int(layout.indptr[2] - layout.indptr[1]) == 2
+
+
+def test_missing_listed_filled_with_nan(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame(
+            [
+                ("SZ000001", "2020-01-02", 1.0),
+                ("SH600000", "2020-01-02", np.nan),
+            ]
+        ),
+    )
+    # first write drops all-NaN rows per stock after dropna on keys only; SH600000 stays
+    panel = store.read_factor_panel("f")
+    assert panel.loc["2020-01-02", "SZ000001"] == pytest.approx(1.0)
+    assert np.isnan(panel.loc["2020-01-02", "SH600000"])
+    layout = store._read_layout("f")
+    assert int(layout.indptr[1] - layout.indptr[0]) == 2
+
+
+def test_hash_mismatch_rejects_read(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-02", 1.0)]))
+    lines = store._columns_path.read_text(encoding="utf-8").splitlines()
+    parts = lines[0].split("\t")
+    parts[2] = "2019-01-01"
+    store._columns_path.write_text("\t".join(parts) + "\n", encoding="utf-8")
+    store._columns_cache = None
+    with pytest.raises(ValueError, match="拒绝读取|哈希"):
+        store.read_factor_panel("f")
+
+
+def test_short_payload_rejects_read(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-02", 1.0)]))
+    f32 = store.features_dir / "f.f32"
+    f32.write_bytes(f32.read_bytes()[:2])
+    with pytest.raises(ValueError, match="拒绝读取|短于"):
+        store.read_factor_panel("f")
+
+
+def test_width_mismatch_rejects_read(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame(
+            [
+                ("SZ000001", "2020-01-02", 1.0),
+                ("SH600000", "2020-01-02", 2.0),
+            ]
+        ),
+    )
+    layout = store._read_layout("f")
+    layout.indptr[1] = 1
+    layout.n_floats = 1
+    _, layout_path = store._factor_paths("f")
+    layout_path.write_bytes(layout.dumps())
+    (store.features_dir / "f.f32").write_bytes(np.float32(1.0).tobytes())
+    with pytest.raises(ValueError, match="拒绝读取|行宽"):
+        store.read_factor_panel("f")
+
+
+def test_calendar_tail_append_no_remap(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-02", 1.0)]))
+    f32 = store.features_dir / "f.f32"
+    before = f32.read_bytes()
+    store.ensure_calendar(["2020-01-02", "2020-01-03"])
+    assert f32.read_bytes() == before
+    assert store.read_calendar()[-1] == "2020-01-03"
+    panel = store.read_factor_panel("f")
+    assert panel.loc["2020-01-02", "SZ000001"] == pytest.approx(1.0)
+
+
+def test_calendar_mid_insert_remap(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame(
+            [
+                ("SZ000001", "2020-01-02", 1.0),
+                ("SZ000001", "2020-01-06", 2.0),
+            ]
+        ),
+    )
+    store.ensure_calendar(["2020-01-02", "2020-01-03", "2020-01-06"])
+    assert store.read_calendar() == ["2020-01-02", "2020-01-03", "2020-01-06"]
+    panel = store.read_factor_panel("f")
+    assert panel.loc["2020-01-02", "SZ000001"] == pytest.approx(1.0)
+    assert np.isnan(panel.loc["2020-01-03", "SZ000001"])
+    assert panel.loc["2020-01-06", "SZ000001"] == pytest.approx(2.0)
+
+
+def test_replace_and_delete(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-02", 1.0)]))
+    store.upsert_factor_data(
+        "f",
+        _frame([("SZ000001", "2020-01-02", 9.0)]),
+        replace=True,
+    )
+    assert store.read_factor_panel("f").loc["2020-01-02", "SZ000001"] == pytest.approx(9.0)
+    store.delete_factors(["f"])
+    assert "f" not in store.list_stored_factor_names()
+    assert not (store.features_dir / "f.f32").exists()
+    assert not (store.features_dir / "f.layout").exists()
+
+
+def test_date_and_symbol_slice(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame(
+            [
+                ("SZ000001", "2020-01-02", 1.0),
+                ("SH600000", "2020-01-02", 2.0),
+                ("SZ000001", "2020-01-03", 3.0),
+                ("SH600000", "2020-01-03", 4.0),
+            ]
+        ),
+    )
+    one = store.read_factor_panel("f", start_date="2020-01-03", end_date="2020-01-03")
+    assert list(one.index) == ["2020-01-03"]
+    subset = store.read_factor_panel("f", symbols=["SH600000"])
+    assert list(subset.columns) == ["SH600000"]
+    assert subset.loc["2020-01-02", "SH600000"] == pytest.approx(2.0)
+
+
+def test_all_nan_rejected(tmp_path):
+    store = _store(tmp_path)
+    written = store.upsert_factor_data(
+        "f",
+        _frame([("SZ000001", "2020-01-02", np.nan)]),
+    )
+    assert written == 0
+    assert store._read_layout("f") is None
+
+
+def test_append_without_layout_stays_on_old_publish(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame([("SZ000001", "2020-01-02", 1.0)]),
+    )
+    layout_before = (store.features_dir / "f.layout").read_bytes()
+    extra = np.asarray([9.0], dtype=np.float32).tobytes()
+    with (store.features_dir / "f.f32").open("ab") as handle:
+        handle.write(extra)
+    panel = store.read_factor_panel("f")
+    assert panel.loc["2020-01-02", "SZ000001"] == pytest.approx(1.0)
+    assert (store.features_dir / "f.layout").read_bytes() == layout_before
+    assert (store.features_dir / "f.f32").stat().st_size > 4
+
+
+def test_listed_mask_rules():
+    from DailyUpdates.storage.bin_storage import Column
+
+    columns = [
+        Column(0, "A", "2020-01-02"),
+        Column(1, "B", "2020-01-03"),
+    ]
+    delist = {0: "2020-01-06"}
+    assert listed_mask("2020-01-02", columns, delist).tolist() == [True, False]
+    assert listed_mask("2020-01-03", columns, delist).tolist() == [True, True]
+    assert listed_mask("2020-01-06", columns, delist).tolist() == [False, True]
+
+
+def test_instruments_append_only(tmp_path):
+    store = _store(tmp_path)
+    store.write_instruments({"SZ000001": ("2020-01-02", "")})
+    store.write_instruments(
+        {"SZ000001": ("2010-01-01", ""), "SH600000": ("2020-01-03", "")}
+    )
+    columns = store.read_columns()
+    assert columns[0].symbol == "SZ000001"
+    assert columns[0].list_date == "2020-01-02"
+    assert columns[1].symbol == "SH600000"
+    mapping = store.read_instruments()
+    assert mapping["SZ000001"] == ("2020-01-02", "")
+
+
+def test_factor_latest_date_ignores_future_calendar(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data("f", _frame([("SZ000001", "2026-09-21", 1.0)]))
+    store.ensure_calendar(["2026-09-21", "2027-10-27"])
+    assert store.read_calendar()[-1] == "2027-10-27"
+    assert store.get_factor_latest_date("f") == "2026-09-21"

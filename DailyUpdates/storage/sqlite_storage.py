@@ -16,7 +16,13 @@ import pandas as pd
 
 from .etf_schema import ETF_BASIC_COLUMNS
 from .event_schema import EVENT_BY_API, EventTable, event_spec
-from .financial_schema import FINANCIAL_KEY_COLUMNS, FINANCIAL_VALUE_FIELDS
+from .financial_schema import (
+    FINANCIAL_KEY_COLUMNS,
+    FINANCIAL_VALUE_FIELDS,
+    STATEMENT_KEY_COLUMNS,
+    STATEMENT_TABLES,
+    STATEMENT_VALUE_FIELDS,
+)
 
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -197,6 +203,7 @@ class SQLiteStorage:
             )
             self._migrate_financial_indicator(connection)
             self._ensure_financial_columns(connection)
+            self._ensure_statement_tables(connection)
             self._ensure_event_tables(connection)
             self._ensure_stock_basic_columns(connection)
             self._migrate_stock_basic_symbols(connection)
@@ -237,6 +244,51 @@ class SQLiteStorage:
             connection.execute(
                 f'ALTER TABLE financial_indicator ADD COLUMN "{field}" REAL'
             )
+
+    def _ensure_statement_tables(self, connection: sqlite3.Connection) -> None:
+        for table in STATEMENT_TABLES:
+            self._ensure_statement_columns(connection, table)
+
+    def _statement_create_sql(self, table: str) -> str:
+        table = self._statement_table_name(table)
+        value_sql = ",\n                    ".join(
+            f"{field} REAL" for field in STATEMENT_VALUE_FIELDS[table]
+        )
+        return f"""
+                CREATE TABLE IF NOT EXISTS {table} (
+                    symbol TEXT NOT NULL,
+                    ann_date TEXT,
+                    end_date TEXT NOT NULL,
+                    update_flag TEXT NOT NULL DEFAULT '',
+                    {value_sql},
+                    PRIMARY KEY (symbol, end_date, ann_date, update_flag)
+                );
+                CREATE INDEX IF NOT EXISTS idx_{table}_ann ON {table} (ann_date);
+                CREATE INDEX IF NOT EXISTS idx_{table}_end ON {table} (end_date);
+                """
+
+    def _ensure_statement_columns(
+        self, connection: sqlite3.Connection, table: str
+    ) -> None:
+        table = self._statement_table_name(table)
+        existing = {
+            row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+        }
+        if not existing:
+            connection.executescript(self._statement_create_sql(table))
+            return
+        for field in STATEMENT_VALUE_FIELDS[table]:
+            if field in existing:
+                continue
+            field = self._validate_identifier(field)
+            connection.execute(f'ALTER TABLE {table} ADD COLUMN "{field}" REAL')
+
+    @staticmethod
+    def _statement_table_name(table: str) -> str:
+        name = str(table).strip().lower()
+        if name not in STATEMENT_TABLES:
+            raise ValueError(f"未知财务报表: {table!r}")
+        return name
 
     def _ensure_event_tables(self, connection: sqlite3.Connection) -> None:
         connection.execute("DROP TABLE IF EXISTS analyst_forecast")
@@ -528,7 +580,11 @@ class SQLiteStorage:
         return [str(row["symbol"]) for row in rows]
 
     def get_latest_market_date(self) -> Optional[str]:
-        """行情表里最后一根 K 线的日期。不含 trade_calendar 里尚未拉行情的未来开市日。"""
+        """行情数据截止日：``market_data`` 最后一根 K 线。
+
+        bin / 因子水位 / 增量窗口只用这个。不要用 ``list_trade_dates()[-1]``：
+        交易日历会预写尚未拉行情的未来开市日。
+        """
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT MAX(trade_date) AS latest FROM market_data"
@@ -539,7 +595,17 @@ class SQLiteStorage:
         self,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        *,
+        include_future: bool = False,
     ) -> List[str]:
+        """开市日列表，默认截到 ``get_latest_market_date()``。
+
+        未传 ``end_date`` 且 ``include_future=False`` 时，不会返回日历里
+        尚未拉行情的未来开市日。只有实盘要对齐下一开市日时才设
+        ``include_future=True``。
+        """
+        if end_date is None and not include_future:
+            end_date = self.get_latest_market_date()
         clauses: List[str] = []
         params: List[str] = []
         if start_date:
@@ -578,6 +644,10 @@ class SQLiteStorage:
         return len(rows)
 
     def get_calendar_range(self) -> Tuple[Optional[str], Optional[str]]:
+        """``trade_calendar`` 首末日，末日可能是尚未拉行情的未来开市日。
+
+        数据截止请用 ``get_latest_market_date()``。
+        """
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT MIN(trade_date) AS first, MAX(trade_date) AS last "
@@ -1107,7 +1177,7 @@ class SQLiteStorage:
 
     def upsert_financial_indicator(self, data: pd.DataFrame) -> int:
         """Insert/update financial_indicator rows without wiping the table."""
-        prepared = self._prepare_financial_indicator(data)
+        prepared = self._prepare_financial_rows(data, FINANCIAL_VALUE_FIELDS)
         if prepared is None:
             return 0
         columns, rows = prepared
@@ -1125,13 +1195,67 @@ class SQLiteStorage:
             connection.executemany(sql, rows)
         return len(rows)
 
+    def replace_financial_statement(self, table: str, data: pd.DataFrame) -> int:
+        table = self._statement_table_name(table)
+        values = STATEMENT_VALUE_FIELDS[table]
+        prepared = self._prepare_financial_rows(data, values)
+        if prepared is None:
+            return 0
+        columns, rows = prepared
+        quoted = ", ".join(f'"{column}"' for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        with self._connect() as connection:
+            self._ensure_statement_columns(connection, table)
+            connection.execute(f"DELETE FROM {table}")
+            connection.executemany(
+                f"INSERT INTO {table} ({quoted}) VALUES ({placeholders})",
+                rows,
+            )
+        return len(rows)
+
+    def upsert_financial_statement(self, table: str, data: pd.DataFrame) -> int:
+        table = self._statement_table_name(table)
+        values = STATEMENT_VALUE_FIELDS[table]
+        prepared = self._prepare_financial_rows(data, values)
+        if prepared is None:
+            return 0
+        columns, rows = prepared
+        quoted = ", ".join(f'"{column}"' for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        updates = ", ".join(f'"{field}" = excluded."{field}"' for field in values)
+        sql = (
+            f"INSERT INTO {table} ({quoted}) VALUES ({placeholders}) "
+            f"ON CONFLICT(symbol, end_date, ann_date, update_flag) DO UPDATE SET {updates}"
+        )
+        with self._connect() as connection:
+            self._ensure_statement_columns(connection, table)
+            connection.executemany(sql, rows)
+        return len(rows)
+
+    def get_financial_statement_latest_ann_date(self, table: str) -> Optional[str]:
+        table = self._statement_table_name(table)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT MAX(ann_date) AS latest FROM {table} "
+                "WHERE ann_date IS NOT NULL AND ann_date != ''"
+            ).fetchone()
+            return row["latest"] if row and row["latest"] else None
+
+    def clear_financial_statement(self, table: str) -> None:
+        table = self._statement_table_name(table)
+        with self._connect() as connection:
+            connection.execute(f"DELETE FROM {table}")
+
     def _prepare_financial_indicator(self, data: pd.DataFrame):
+        return self._prepare_financial_rows(data, FINANCIAL_VALUE_FIELDS)
+
+    def _prepare_financial_rows(self, data: pd.DataFrame, value_fields: Sequence[str]):
         if data is None or data.empty:
             return None
         frame = data.copy()
         if "symbol" not in frame.columns and "ts_code" in frame.columns:
             frame["symbol"] = frame["ts_code"].astype(str).map(self._normalize_symbol)
-        columns = list(FINANCIAL_KEY_COLUMNS) + list(FINANCIAL_VALUE_FIELDS)
+        columns = list(STATEMENT_KEY_COLUMNS) + list(value_fields)
         for column in columns:
             if column not in frame.columns:
                 frame[column] = None

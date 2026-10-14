@@ -6,7 +6,7 @@ Tushare数据源类，专门处理Tushare API调用
 
 import tushare as ts
 import pandas as pd
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 import os
 import time
 from tqdm import tqdm
@@ -17,7 +17,13 @@ from DailyUpdates.storage.etf_schema import (
     ETF_TUSHARE_DAILY_FIELDS,
 )
 from DailyUpdates.storage.event_schema import event_spec
-from DailyUpdates.storage.financial_schema import FINANCIAL_TUSHARE_FIELDS
+from DailyUpdates.storage.financial_schema import (
+    FINANCIAL_TUSHARE_FIELDS,
+    STATEMENT_TUSHARE_FIELDS,
+    STATEMENT_VALUE_FIELDS,
+    canonicalize_statement_fields,
+    statement_table_for_api,
+)
 
 # index_weight 请求代码与配置代码可以不同，写入仍用配置里的代码。
 # 000300.SH → 399300.SZ：https://github.com/waditu/tushare/issues/801
@@ -173,6 +179,10 @@ class TushareDataSource(DataSourceBase):
         elif data_type == 'financial':
             if api_name in ('fina_indicator', 'fina_indicator_vip'):
                 return self._fetch_fina_indicator(config, fields, start_date, end_date)
+            if statement_table_for_api(api_name):
+                return self._fetch_financial_statement(
+                    config, fields, start_date, end_date
+                )
             raise ValueError(f"不支持的财务API接口: {api_name}")
 
         elif data_type == 'event':
@@ -960,6 +970,142 @@ class TushareDataSource(DataSourceBase):
                 )
             return pd.DataFrame()
         return part
+
+    def _fetch_financial_statement(
+        self, config: Dict, fields, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """资产负债表 / 现金流量表瘦身切片。默认 VIP 按报告期，限股票走普通接口。"""
+        api_name = str(config.get("api_name") or "")
+        table = statement_table_for_api(api_name)
+        if table is None:
+            raise ValueError(f"不支持的财务报表接口: {api_name}")
+        value_fields = STATEMENT_VALUE_FIELDS[table]
+        field_list = list(
+            canonicalize_statement_fields(
+                self._as_field_list(fields) or STATEMENT_TUSHARE_FIELDS[table]
+            )
+        )
+        if "update_flag" not in field_list:
+            field_list.append("update_flag")
+        codes = self._codes_from_config(config)
+        use_vip = bool(config.get("use_vip", not codes))
+        getter = self._statement_getter(table, use_vip=use_vip and not codes)
+        label = table
+        if codes:
+            result = self._fetch_statement_by_codes(
+                getter, codes, field_list, start_date, end_date, config
+            )
+        elif str(config.get("fetch_mode") or "period").lower() == "ann_date":
+            result = self._fetch_fina_by_ann_dates(
+                getter, field_list, start_date, end_date, config
+            )
+        else:
+            as_of = min(
+                pd.Timestamp(end_date) if end_date else pd.Timestamp.today(),
+                pd.Timestamp.today(),
+            ).normalize()
+            periods = config.get("periods") or self._quarter_periods(
+                start_date, end_date, as_of=as_of.strftime("%Y-%m-%d")
+            )
+            if not periods:
+                raise ValueError(f"{api_name} 未生成任何报告期，请检查日期范围")
+            print(
+                f"[financial] {label} 按报告期拉取 periods={len(periods)} "
+                f"use_vip={use_vip}",
+                flush=True,
+            )
+            frames = []
+            progress = tqdm(periods, desc=f"拉取{label}", unit="期")
+            for period in progress:
+                progress.set_postfix_str(str(period))
+                part = self._fetch_fina_period(getter, period, field_list, as_of)
+                if part is not None and not part.empty:
+                    frames.append(part)
+                    tqdm.write(f"[financial] {label} period={period} -> {len(part)} 行")
+                else:
+                    tqdm.write(f"[financial] {label} period={period} -> 空")
+                time.sleep(float(config.get("pause_seconds", 1.0)))
+            result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        finalized = self._finalize_fina_frame(result)
+        return self._require_statement_columns(finalized, value_fields, api_name)
+
+    def _statement_getter(self, table: str, use_vip: bool) -> Callable:
+        vip_name = f"{table}_vip"
+        if use_vip:
+            getter = getattr(self.pro, vip_name, None)
+            if getter is None:
+                raise RuntimeError(f"{vip_name} 不可用，无法按报告期拉全市场")
+            return getter
+        getter = getattr(self.pro, table, None)
+        if getter is None:
+            raise RuntimeError(f"当前 tushare 没有 {table} 接口")
+        return getter
+
+    def _fetch_statement_by_codes(
+        self,
+        getter: Callable,
+        codes: List[str],
+        field_list: List[str],
+        start_date: str,
+        end_date: str,
+        config: Dict,
+    ) -> pd.DataFrame:
+        periods = config.get("periods")
+        frames = []
+        pause = float(config.get("pause_seconds", 0.35))
+        if periods:
+            jobs = [(code, str(period)) for code in codes for period in periods]
+            progress = tqdm(jobs, desc="拉取报表(股票)", unit="次")
+            for code, period in progress:
+                progress.set_postfix_str(f"{code} {period}")
+                part = self.getTushareInfo(
+                    getter, {"ts_code": code, "period": period}, field_list
+                )
+                if part is not None and not part.empty:
+                    frames.append(part)
+                time.sleep(pause)
+        else:
+            start = "".join(ch for ch in str(start_date) if ch.isdigit())[:8]
+            end = "".join(ch for ch in str(end_date) if ch.isdigit())[:8]
+            progress = tqdm(codes, desc="拉取报表(股票)", unit="股")
+            for code in progress:
+                progress.set_postfix_str(code)
+                part = self.getTushareInfo(
+                    getter,
+                    {"ts_code": code, "start_date": start, "end_date": end},
+                    field_list,
+                )
+                if part is not None and not part.empty:
+                    frames.append(part)
+                time.sleep(pause)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    @staticmethod
+    def _codes_from_config(config: Dict) -> List[str]:
+        raw = config.get("symbols") or config.get("ts_codes") or config.get("ts_code")
+        if raw is None or raw == "":
+            return []
+        if isinstance(raw, str):
+            items = [raw]
+        else:
+            items = list(raw)
+        return [str(item).strip().upper() for item in items if str(item).strip()]
+
+    @staticmethod
+    def _require_statement_columns(
+        frame: pd.DataFrame, value_fields: Sequence[str], api_name: str
+    ) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame() if frame is None else frame
+        missing = [name for name in value_fields if name not in frame.columns]
+        if missing:
+            raise RuntimeError(
+                f"{api_name} 返回表缺少字段 {missing}，实际列={list(frame.columns)}。"
+                "多半是字段名和 Tushare 文档不一致（筹资净额为 n_cash_flows_fnc_act）。"
+            )
+        return frame
 
     def _fetch_index_weight(
         self, config: Dict, fields, start_date: str, end_date: str

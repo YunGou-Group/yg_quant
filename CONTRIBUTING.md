@@ -6,10 +6,12 @@
 python -m pytest tests
 ```
 
-Akshare 真实网络探测默认跳过。需要时：
+Akshare / Ricequant 真实网络探测默认跳过。需要时：
 
 ```powershell
 $env:AKSHARE_LIVE=1; python -m pytest tests/test_akshare_live.py -q
+$env:RQDATA_LIVE=1; python -m pytest tests/test_ricequant_live.py -q
+$env:TUSHARE_LIVE=1; python -m pytest tests/test_tushare_live.py -q
 ```
 
 扩展示例（都会被自动扫到，不必改入口）：

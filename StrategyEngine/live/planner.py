@@ -38,7 +38,9 @@ def next_session(
         )
     if storage is None:
         storage = SQLiteStorage(str(default_db_path()))
-    found = _first_after(asof, storage.list_trade_dates(start_date=asof))
+    found = _first_after(
+        asof, storage.list_trade_dates(start_date=asof, include_future=True)
+    )
     if found:
         return found
     raise ValueError(

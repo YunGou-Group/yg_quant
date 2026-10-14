@@ -18,6 +18,7 @@ from DailyUpdates.data_fetcher.dataset_installer import (
 from DailyUpdates.data_fetcher.data_fetcher import discover_data_source_classes
 from DailyUpdates.data_fetcher.stock_data_updater import StockDataUpdater
 from DailyUpdates.storage import SQLiteStorage
+from DailyUpdates.storage.financial_schema import statement_table_for_api
 from yg_quant_repo import default_db_path
 
 logger = logging.getLogger(__name__)
@@ -285,8 +286,13 @@ class UnifiedScheduler:
                 self.storage.clear_stock_namechange()
                 logs.append(f"已清空 stock_namechange ({name})")
             elif data_type == "financial":
-                self.storage.clear_financial_indicator()
-                logs.append(f"已清空 financial_indicator ({name})")
+                table = statement_table_for_api(api_name)
+                if table:
+                    self.storage.clear_financial_statement(table)
+                    logs.append(f"已清空 {table} ({name})")
+                else:
+                    self.storage.clear_financial_indicator()
+                    logs.append(f"已清空 financial_indicator ({name})")
             elif data_type == "event":
                 self.storage.clear_event(api_name)
                 logs.append(f"已清空 {api_name} ({name})")

@@ -120,11 +120,17 @@ class FactorUpdater:
         """可选：YG_QUANT_FACTOR_START_DATE 限制首次写入起点；未设置则写满可用历史。"""
         return _parse_date(os.getenv("YG_QUANT_FACTOR_START_DATE"))
 
-    def _factor_output_start(self, factor_name: str) -> Optional[str]:
+    def _factor_output_start(
+        self, factor_name: str, end_date: Optional[str] = None
+    ) -> Optional[str]:
         if self.rebuild:
             return self._history_start_env()
         latest = self.factor_storage.get_factor_latest_date(factor_name)
         if latest:
+            end = _parse_date(end_date)
+            # 交易日历含未来开市日时，水位可能超过行情最后一日，增量会被跳过。
+            if end and latest > end:
+                return end
             return (pd.Timestamp(latest) + timedelta(days=1)).strftime("%Y-%m-%d")
         return self._history_start_env()
 
@@ -252,7 +258,7 @@ class FactorUpdater:
         """行情加载起点 = min(各因子输出起点) - lookback；全量历史则返回 None。"""
         selected = list(factors) if factors is not None else self.factors
         output_starts: List[Optional[str]] = [
-            self._factor_output_start(factor.get_name()) for factor in selected
+            self._factor_output_start(factor.get_name(), end_date) for factor in selected
         ]
         if any(start is None for start in output_starts):
             self.logger.info(
@@ -322,7 +328,7 @@ class FactorUpdater:
         self, factor: BaseFactor, market_data: pd.DataFrame, end_date: Optional[str]
     ) -> Dict:
         name = factor.get_name()
-        start = self._factor_output_start(name)
+        start = self._factor_output_start(name, end_date)
         replace = self._is_full_rebuild(name)
         if start and end_date:
             if start > pd.Timestamp(end_date).strftime("%Y-%m-%d"):
@@ -397,7 +403,9 @@ class FactorUpdater:
         end_date: Optional[str],
     ) -> None:
         """日频增量先把日历/instruments 对齐一次，避免 6 个因子同时抢轴锁、各写一遍 all.txt。"""
-        starts = [self._factor_output_start(factor.get_name()) for factor in factors]
+        starts = [
+            self._factor_output_start(factor.get_name(), end_date) for factor in factors
+        ]
         dated = [start for start in starts if start]
         if market_data.empty:
             return

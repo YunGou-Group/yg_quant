@@ -3,12 +3,13 @@
 """financial_indicator 字段：PIT 财务列，对齐必须用 ann_date。
 
 列名与 Tushare fina_indicator / fina_indicator_vip 一致。
-质量、基础、成长、每股因子用指标表已算好的比率和同比，不另拉三大报表。
+质量、基础、成长、每股因子用指标表已算好的比率和同比。
+另存资产负债表 / 现金流量表瘦身切片（仅因子缺口列），不灌整张三大报表。
 """
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 # 主键列（与 Tushare fina_indicator 对齐）
 FINANCIAL_KEY_COLUMNS: Tuple[str, ...] = (
@@ -122,6 +123,71 @@ FINANCIAL_TUSHARE_FIELDS: Tuple[str, ...] = (
     "update_flag",
     *FINANCIAL_VALUE_FIELDS,
 )
+
+# 三大报表瘦身切片：官方字段名，见
+# https://tushare.pro/document/2?doc_id=36
+# https://tushare.pro/document/2?doc_id=44
+# 筹资净额是 n_cash_flows_fnc_act，不是 n_cashflow_fnc_act。
+STATEMENT_KEY_COLUMNS: Tuple[str, ...] = FINANCIAL_KEY_COLUMNS
+
+BALANCESHEET_VALUE_FIELDS: Tuple[str, ...] = (
+    "oth_eqt_tools",
+    "acct_payable",
+)
+CASHFLOW_VALUE_FIELDS: Tuple[str, ...] = (
+    "n_cashflow_inv_act",
+    "n_cash_flows_fnc_act",
+)
+STATEMENT_FIELD_ALIASES: Dict[str, str] = {
+    "n_cashflow_fnc_act": "n_cash_flows_fnc_act",
+}
+
+BALANCESHEET_TUSHARE_FIELDS: Tuple[str, ...] = (
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "update_flag",
+    *BALANCESHEET_VALUE_FIELDS,
+)
+CASHFLOW_TUSHARE_FIELDS: Tuple[str, ...] = (
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "update_flag",
+    *CASHFLOW_VALUE_FIELDS,
+)
+
+STATEMENT_TABLES: Tuple[str, ...] = ("balancesheet", "cashflow")
+STATEMENT_API_TO_TABLE: Dict[str, str] = {
+    "balancesheet": "balancesheet",
+    "balancesheet_vip": "balancesheet",
+    "cashflow": "cashflow",
+    "cashflow_vip": "cashflow",
+}
+STATEMENT_VALUE_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "balancesheet": BALANCESHEET_VALUE_FIELDS,
+    "cashflow": CASHFLOW_VALUE_FIELDS,
+}
+STATEMENT_TUSHARE_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "balancesheet": BALANCESHEET_TUSHARE_FIELDS,
+    "cashflow": CASHFLOW_TUSHARE_FIELDS,
+}
+
+
+def statement_table_for_api(api_name: Optional[str]) -> Optional[str]:
+    if not api_name:
+        return None
+    return STATEMENT_API_TO_TABLE.get(str(api_name).strip().lower())
+
+
+def canonicalize_statement_fields(fields: Iterable[str]) -> Tuple[str, ...]:
+    seen = []
+    for name in fields:
+        official = STATEMENT_FIELD_ALIASES.get(name, name)
+        if official not in seen:
+            seen.append(official)
+    return tuple(seen)
+
 
 # daily_basic 写入 market_data 的列（接口加列后按缺日期回填）
 DAILY_BASIC_BARRA_FIELDS: Tuple[str, ...] = (
