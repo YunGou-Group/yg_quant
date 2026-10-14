@@ -83,6 +83,22 @@ SPECS = (
         40,
         _DEPS,
     ),
+    ("basics_ev_to_ebitda", "ev_to_ebitda", "企业价值 / EBITDA", 40, _DEPS),
+    (
+        "basics_pcf_ratio_total",
+        "pcf_ratio_total",
+        "总市值 / (经营+投资+筹资现金流)",
+        40,
+        _DEPS,
+    ),
+    (
+        "basics_pb_ratio_1",
+        "pb_ratio_1",
+        "市净率（净资产剔除其他权益工具）",
+        40,
+        _DEPS,
+    ),
+    ("basics_fcfe", "pit:fcfe", "股权自由现金流", 40, _DEPS),
 )
 
 install(globals(), __name__, SPECS, extract_fin)

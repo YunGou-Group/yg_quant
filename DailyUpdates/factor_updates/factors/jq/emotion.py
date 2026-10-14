@@ -32,6 +32,13 @@ SPECS = (
     ("emotion_MAWVAD", "mawvad", "WVAD 的 6 日均值", 80, _DEPS),
     ("emotion_VSTD10", "vstd10", "10日成交量标准差", 40, _DEPS),
     ("emotion_VROC6", "vroc6", "6日量变动速率", 40, _DEPS),
+    (
+        "emotion_OBOS",
+        "obos",
+        "超买超卖：10日上涨家数之和减下跌家数之和",
+        40,
+        _DEPS,
+    ),
 )
 
 install(globals(), __name__, SPECS, extract_price)

@@ -14,8 +14,9 @@ from yg_quant_repo import default_db_path
 
 from . import _panel as panel
 
-_CACHE: Dict[int, "FinEngine"] = {}
+_CACHE: Dict[object, "FinEngine"] = {}
 _LOCK = threading.Lock()
+_YUAN_TO_WAN = 10000.0
 
 PERCENT_FIELDS: Set[str] = {
     "roe",
@@ -101,6 +102,7 @@ class FinEngine:
         self,
         data: pd.DataFrame,
         financial: Optional[pd.DataFrame] = None,
+        statements: Optional[Dict[str, pd.DataFrame]] = None,
     ):
         frame = panel.stock_frame(data)
         if "close" in frame.columns:
@@ -128,8 +130,25 @@ class FinEngine:
             else None
         )
         self._fin = self._load_financial(financial)
+        self._injected_statements = statements
+        self._stmt_frames: Dict[str, pd.DataFrame] = {}
         self._pit: Dict[str, pd.DataFrame] = {}
         self._derived: Dict[str, pd.DataFrame] = {}
+
+    def _normalize_events(self, frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        out = frame.copy()
+        if "ts_code" not in out.columns and "symbol" in out.columns:
+            out = out.rename(columns={"symbol": "ts_code"})
+        if "ts_code" not in out.columns:
+            return pd.DataFrame()
+        out["ts_code"] = out["ts_code"].astype(str)
+        if "update_flag" in out.columns:
+            out = out.sort_values(["ts_code", "ann_date", "update_flag"])
+        else:
+            out = out.sort_values(["ts_code", "ann_date"])
+        return out
 
     def _load_financial(self, override: Optional[pd.DataFrame]) -> pd.DataFrame:
         if override is not None:
@@ -138,18 +157,31 @@ class FinEngine:
             from DailyUpdates.storage.sqlite_storage import SQLiteStorage
 
             frame = SQLiteStorage(str(default_db_path())).read_financial_indicator()
-        if frame is None or frame.empty:
-            return pd.DataFrame()
-        if "ts_code" not in frame.columns and "symbol" in frame.columns:
-            frame = frame.rename(columns={"symbol": "ts_code"})
-        frame["ts_code"] = frame["ts_code"].astype(str)
-        if "update_flag" in frame.columns:
-            frame = frame.sort_values(["ts_code", "ann_date", "update_flag"])
-        else:
-            frame = frame.sort_values(["ts_code", "ann_date"])
+        frame = self._normalize_events(frame)
+        if frame.empty:
+            return frame
         for name in PERCENT_FIELDS:
             if name in frame.columns:
                 frame[name] = scale_percent_ratio(frame[name])
+        return frame
+
+    def _load_statement_table(self, table: str) -> pd.DataFrame:
+        from DailyUpdates.storage.sqlite_storage import SQLiteStorage
+
+        try:
+            return SQLiteStorage(str(default_db_path())).read_financial_statement(table)
+        except Exception:
+            return pd.DataFrame()
+
+    def _get_statement(self, table: str) -> pd.DataFrame:
+        if table in self._stmt_frames:
+            return self._stmt_frames[table]
+        if self._injected_statements is not None:
+            raw = self._injected_statements.get(table)
+        else:
+            raw = self._load_statement_table(table)
+        frame = self._normalize_events(raw)
+        self._stmt_frames[table] = frame
         return frame
 
     def pit(self, field: str) -> pd.DataFrame:
@@ -170,6 +202,30 @@ class FinEngine:
             wide = _events_to_wide(events, self.template.index, self.template.columns)
         self._pit[field] = wide
         return wide
+
+    def stmt(self, table: str, field: str) -> pd.DataFrame:
+        key = f"{table}:{field}"
+        if key in self._pit:
+            return self._pit[key]
+        events = self._get_statement(table)
+        if events.empty or field not in events.columns:
+            wide = pd.DataFrame(
+                np.nan, index=self.template.index, columns=self.template.columns
+            )
+        else:
+            piece = events[["ts_code", "ann_date", field]].rename(
+                columns={field: "value"}
+            )
+            piece["value"] = pd.to_numeric(piece["value"], errors="coerce")
+            if "update_flag" in events.columns:
+                piece = piece.assign(update_flag=events["update_flag"])
+                piece = piece.sort_values(["ts_code", "ann_date", "update_flag"])
+            wide = _events_to_wide(piece, self.template.index, self.template.columns)
+        self._pit[key] = wide
+        return wide
+
+    def _stmt_wan(self, table: str, field: str) -> pd.DataFrame:
+        return self.stmt(table, field) / _YUAN_TO_WAN
 
     def compute(self, key: str) -> pd.DataFrame:
         if key.startswith("pit:"):
@@ -279,21 +335,24 @@ class FinEngine:
         base = self._total_revenue() if use_total else self._revenue()
         return self.pit(field) * base
 
-    def _prep_fin_field(self, field: str) -> pd.DataFrame:
-        if self._fin.empty or field not in self._fin.columns:
+    def _prep_field(self, src: pd.DataFrame, field: str) -> pd.DataFrame:
+        if src is None or src.empty or field not in src.columns:
             return pd.DataFrame()
-        ev = self._fin[["ts_code", "ann_date", "end_date", field]].copy()
+        ev = src[["ts_code", "ann_date", "end_date", field]].copy()
         ev["value"] = pd.to_numeric(ev[field], errors="coerce")
         ev["ann_date"] = ev["ann_date"].astype(str)
         ev["end_date"] = ev["end_date"].astype(str)
-        if "update_flag" in self._fin.columns:
-            ev = ev.assign(update_flag=self._fin["update_flag"])
+        if "update_flag" in src.columns:
+            ev = ev.assign(update_flag=src["update_flag"])
             ev = ev.sort_values(["ts_code", "end_date", "ann_date", "update_flag"])
         else:
             ev = ev.sort_values(["ts_code", "end_date", "ann_date"])
         ev = ev.dropna(subset=["value"])
         ev = ev.drop_duplicates(["ts_code", "end_date"], keep="last")
         return ev[["ts_code", "ann_date", "end_date", "value"]]
+
+    def _prep_fin_field(self, field: str) -> pd.DataFrame:
+        return self._prep_field(self._fin, field)
 
     @staticmethod
     def _prior_end(end: str) -> str:
@@ -632,16 +691,74 @@ class FinEngine:
     def _operating_profit_per_share(self) -> pd.DataFrame:
         return self._operating_profit_per_share_ttm()
 
+    def _ev_to_ebitda(self) -> pd.DataFrame:
+        ev = self._market_cap() + self._total_liability()
+        ebitda = self.pit("ebitda")
+        return (ev / ebitda).where(ebitda > 0)
+
+    def _pcf_ratio_total(self) -> pd.DataFrame:
+        ocf = self._scale_ps("ocfps")
+        total_cf = (
+            ocf
+            + self._stmt_wan("cashflow", "n_cashflow_inv_act")
+            + self._stmt_wan("cashflow", "n_cash_flows_fnc_act")
+        )
+        return (self._market_cap() / total_cf).where(total_cf != 0)
+
+    def _pb_ratio_1(self) -> pd.DataFrame:
+        equity = self._book_equity() - self._stmt_wan("balancesheet", "oth_eqt_tools")
+        return (self._market_cap() / equity).where(equity > 0)
+
+    def _cash_conversion_cycle(self) -> pd.DataFrame:
+        cogs = self._times_rev("cogs_of_sales")
+        ap_days = 360.0 * self._stmt_wan("balancesheet", "acct_payable") / cogs.where(
+            cogs > 0
+        )
+        return self.pit("arturn_days") + self.pit("invturn_days") - ap_days
+
+    def _time_interest_earned(self) -> pd.DataFrame:
+        interest = self._times_rev("finaexp_of_gr", use_total=False).abs()
+        ebit = self.pit("ebit")
+        return (ebit / interest).where(interest > 0)
+
+    def _adjusted_roe(self) -> pd.DataFrame:
+        equity = self._book_equity()
+        return (self.pit("profit_dedt") / equity).where(equity > 0)
+
+    def _ncf_inv_yoy(self) -> pd.DataFrame:
+        return self._yoy_wide(
+            "n_cashflow_inv_act",
+            "chg",
+            events=self._prep_field(
+                self._get_statement("cashflow"), "n_cashflow_inv_act"
+            ),
+        )
+
+    def _ncf_fnc_yoy(self) -> pd.DataFrame:
+        return self._yoy_wide(
+            "n_cash_flows_fnc_act",
+            "chg",
+            events=self._prep_field(
+                self._get_statement("cashflow"), "n_cash_flows_fnc_act"
+            ),
+        )
+
 
 def get_fin_engine(
-    data: pd.DataFrame, financial: Optional[pd.DataFrame] = None
+    data: pd.DataFrame,
+    financial: Optional[pd.DataFrame] = None,
+    statements: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> FinEngine:
-    key = id(data) if financial is None else (id(data), id(financial))
+    key: object
+    if financial is None and statements is None:
+        key = id(data)
+    else:
+        key = (id(data), id(financial), id(statements))
     with _LOCK:
         engine = _CACHE.get(key)
         if engine is None:
-            engine = FinEngine(data, financial=financial)
-            if financial is None:
+            engine = FinEngine(data, financial=financial, statements=statements)
+            if financial is None and statements is None:
                 _CACHE.clear()
                 _CACHE[key] = engine
             else:
@@ -654,6 +771,9 @@ def extract_fin(
     key: str,
     start_date: Optional[str] = None,
     financial: Optional[pd.DataFrame] = None,
+    statements: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> pd.DataFrame:
-    wide = get_fin_engine(data, financial=financial).compute(key)
+    wide = get_fin_engine(
+        data, financial=financial, statements=statements
+    ).compute(key)
     return panel.wide_to_long(wide, start_date=start_date)

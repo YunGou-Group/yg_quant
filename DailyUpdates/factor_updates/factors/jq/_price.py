@@ -67,6 +67,58 @@ def _rolling_mad(arr: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
+@njit
+def _rolling_mdd(arr: np.ndarray, window: int) -> np.ndarray:
+    t_n, n_col = arr.shape
+    out = np.full((t_n, n_col), np.nan)
+    for j in range(n_col):
+        col = arr[:, j]
+        for t in range(window - 1, t_n):
+            peak = -1.0e308
+            mdd = 0.0
+            ok = True
+            for k in range(window):
+                v = col[t - window + 1 + k]
+                if not np.isfinite(v):
+                    ok = False
+                    break
+                if v > peak:
+                    peak = v
+                if peak > 0.0:
+                    dd = 1.0 - v / peak
+                    if dd > mdd:
+                        mdd = dd
+            if ok:
+                out[t, j] = mdd
+    return out
+
+
+@njit
+def _dma_apply(x: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    t_n, n_col = x.shape
+    out = np.full((t_n, n_col), np.nan)
+    for j in range(n_col):
+        prev = np.nan
+        started = False
+        for t in range(t_n):
+            xv = x[t, j]
+            av = alpha[t, j]
+            if not np.isfinite(xv) or not np.isfinite(av):
+                continue
+            a = av
+            if a < 0.0:
+                a = 0.0
+            elif a > 1.0:
+                a = 1.0
+            if not started:
+                prev = xv
+                started = True
+            else:
+                prev = a * xv + (1.0 - a) * prev
+            out[t, j] = prev
+    return out
+
+
 class PriceEngine:
     def __init__(self, data: pd.DataFrame):
         frame = panel.stock_frame(data)
@@ -656,6 +708,74 @@ class PriceEngine:
 
     def _single_day_vpt_12(self) -> pd.DataFrame:
         return self._ma(self._single_day_vpt(), 12)
+
+    def _kdj_j(self) -> pd.DataFrame:
+        n, span_k, span_d = 9, 5, 5
+        ll = self.low.rolling(n, min_periods=n).min()
+        hh = self.high.rolling(n, min_periods=n).max()
+        span = hh - ll
+        rsv = 100.0 * (self.close - ll) / span.where(span > 0)
+        k = self._ema(rsv, span_k)
+        d = self._ema(k, span_d)
+        return 3.0 * k - 2.0 * d
+
+    def _adx(self) -> pd.DataFrame:
+        m1, m2 = 14, 6
+        prev_h = self.high.shift(1)
+        prev_l = self.low.shift(1)
+        tr_sum = self.tr.rolling(m1, min_periods=m1).sum()
+        hd = self.high - prev_h
+        ld = prev_l - self.low
+        dmp = hd.where((hd > 0) & (hd > ld), 0.0).rolling(m1, min_periods=m1).sum()
+        dmm = ld.where((ld > 0) & (ld > hd), 0.0).rolling(m1, min_periods=m1).sum()
+        di1 = 100.0 * dmp / tr_sum.where(tr_sum > 0)
+        di2 = 100.0 * dmm / tr_sum.where(tr_sum > 0)
+        dx = 100.0 * (di1 - di2).abs() / (di1 + di2).where((di1 + di2) > 0)
+        return self._ma(dx, m2)
+
+    def _obv(self) -> pd.DataFrame:
+        sign = np.sign(self.close.diff().to_numpy(dtype=np.float64))
+        signed = self.vol.to_numpy(dtype=np.float64) * sign
+        signed = np.where(np.isfinite(signed), signed, 0.0)
+        return self._wrap(np.cumsum(signed, axis=0)).where(self.close.notna())
+
+    def _mdd60(self) -> pd.DataFrame:
+        return self._wrap(_rolling_mdd(self.close.to_numpy(dtype=np.float64), 60))
+
+    def _mcst(self) -> pd.DataFrame:
+        typical = (self.amount / self.vol).where((self.vol > 0) & (self.amount > 0))
+        alpha = (self.turn / 100.0).clip(lower=0.0, upper=1.0)
+        return self._wrap(
+            _dma_apply(
+                typical.to_numpy(dtype=np.float64),
+                alpha.to_numpy(dtype=np.float64),
+            )
+        )
+
+    def _obos(self) -> pd.DataFrame:
+        n = 10
+        prev = self.close.shift(1)
+        valid = self.close.notna() & prev.notna()
+        up = (self.close > prev).where(valid, False)
+        down = (self.close < prev).where(valid, False)
+        series = (up.sum(axis=1) - down.sum(axis=1)).rolling(n, min_periods=n).sum()
+        return pd.DataFrame(
+            np.broadcast_to(series.to_numpy()[:, None], self.close.shape),
+            index=self.close.index,
+            columns=self.close.columns,
+        )
+
+    def _cr(self) -> pd.DataFrame:
+        n = 26
+        mid = ((self.high + self.low) / 2.0).shift(1)
+        up = (self.high - mid).clip(lower=0.0)
+        dn = (mid - self.low).clip(lower=0.0)
+        su = up.rolling(n, min_periods=n).sum()
+        sd = dn.rolling(n, min_periods=n).sum()
+        return 100.0 * su / sd.where(sd > 0)
+
+    def _volt20(self) -> pd.DataFrame:
+        return self._std(self.close, 20)
 
 
 def get_price_engine(data: pd.DataFrame) -> PriceEngine:

@@ -149,6 +149,27 @@ SPECS = (
         40,
         _DEPS,
     ),
+    (
+        "quality_cash_conversion_cycle",
+        "cash_conversion_cycle",
+        "现金循环周期：存货+应收天数−应付天数",
+        40,
+        _DEPS,
+    ),
+    (
+        "quality_time_interest_earned",
+        "time_interest_earned",
+        "利息保障倍数：EBIT / 财务费用",
+        40,
+        _DEPS,
+    ),
+    (
+        "quality_adjusted_roe",
+        "adjusted_roe",
+        "扣非净利润 / 账面净资产",
+        40,
+        _DEPS,
+    ),
 )
 
 install(globals(), __name__, SPECS, extract_fin)

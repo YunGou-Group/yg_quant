@@ -20,6 +20,27 @@ SPECS = (
         _DEPS,
     ),
     ("growth_PEG", "peg", "PE_TTM / (净利同比×100)，PE 或增长为负缺失", 40, _DEPS),
+    (
+        "growth_adjusted_net_profit_yoy",
+        "pit:dt_netprofit_yoy",
+        "扣非净利润同比",
+        40,
+        _DEPS,
+    ),
+    (
+        "growth_invest_cashflow_yoy",
+        "ncf_inv_yoy",
+        "投资活动现金流同比",
+        40,
+        _DEPS,
+    ),
+    (
+        "growth_finance_cashflow_yoy",
+        "ncf_fnc_yoy",
+        "筹资活动现金流同比",
+        40,
+        _DEPS,
+    ),
 )
 
 install(globals(), __name__, SPECS, extract_fin)

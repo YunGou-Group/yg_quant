@@ -1488,6 +1488,46 @@ class SQLiteStorage:
             )
             return pd.read_sql_query(sql, connection, params=params)
 
+    def read_financial_statement(
+        self,
+        table: str,
+        symbols: Optional[Sequence[str]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        table = self._statement_table_name(table)
+        clauses = []
+        params: List[str] = []
+        if symbols:
+            placeholders = ", ".join("?" for _ in symbols)
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(str(symbol) for symbol in symbols)
+        if start_date:
+            clauses.append("end_date >= ?")
+            params.append(self._date_string(start_date))
+        if end_date:
+            clauses.append("end_date <= ?")
+            params.append(self._date_string(end_date))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            self._ensure_statement_columns(connection, table)
+            existing = {
+                row["name"]
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            select_cols = [
+                name
+                for name in list(STATEMENT_KEY_COLUMNS)
+                + list(STATEMENT_VALUE_FIELDS[table])
+                if name in existing
+            ]
+            quoted = ", ".join(f'"{name}"' for name in select_cols)
+            sql = (
+                f"SELECT {quoted} FROM {table}{where} "
+                "ORDER BY symbol, end_date, ann_date, update_flag"
+            )
+            return pd.read_sql_query(sql, connection, params=params)
+
     def replace_index_constituents(
         self, data: pd.DataFrame, index_codes: Optional[Sequence[str]] = None
     ) -> int:
