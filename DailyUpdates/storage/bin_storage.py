@@ -722,6 +722,115 @@ class BinStorage:
         finally:
             os.close(fd)
 
+    @staticmethod
+    def _publish_end_index(
+        calendar: Sequence[str], dates: Sequence[str]
+    ) -> int:
+        index = {day: i for i, day in enumerate(calendar)}
+        hits = [index[day] for day in dates if day in index]
+        if not hits:
+            raise ValueError("写入日期都不在日历上")
+        return max(hits)
+
+    def _read_payload(self, factor_name: str, n_floats: int) -> np.ndarray:
+        f32_path, _ = self._factor_paths(factor_name)
+        payload = np.fromfile(f32_path, dtype=_FLOAT32, count=int(n_floats))
+        if payload.size < int(n_floats):
+            raise ValueError(f"因子 {factor_name} 读取短于 n_floats")
+        return payload
+
+    def _truncate_published(
+        self,
+        factor_name: str,
+        layout: FactorLayout,
+        calendar: Sequence[str],
+        columns: Sequence[Column],
+        delist_lines: Sequence[str],
+        n_days: int,
+    ) -> FactorLayout:
+        n_days = int(n_days)
+        if n_days < 0 or n_days > layout.n_days:
+            raise ValueError(f"截断天数 {n_days} 超出已发布 {layout.n_days}")
+        if n_days == layout.n_days:
+            return layout
+        new_indptr = np.asarray(layout.indptr[: n_days + 1], dtype=_INT64).copy()
+        f32_path, _ = self._factor_paths(factor_name)
+        new_bytes = int(new_indptr[-1]) * int(_FLOAT32.itemsize)
+        if f32_path.exists() and f32_path.stat().st_size > new_bytes:
+            os.truncate(str(f32_path), new_bytes)
+        logger.info(
+            "截断因子 %s 已发布区间: %s -> %s 天",
+            factor_name,
+            layout.n_days,
+            n_days,
+        )
+        return self._publish_layout(
+            factor_name,
+            calendar,
+            columns[: layout.n_columns],
+            delist_lines[: layout.n_delist],
+            new_indptr,
+        )
+
+    def _suffix_cut_index(
+        self,
+        calendar: Sequence[str],
+        columns: Sequence[Column],
+        delist: Dict[int, str],
+        values: Dict[str, Dict[str, float]],
+        layout: FactorLayout,
+    ) -> Optional[int]:
+        cut: Optional[int] = None
+        if len(columns) > layout.n_columns:
+            first_list = min(col.list_date for col in columns[layout.n_columns :])
+            for day_i, day in enumerate(calendar[: layout.n_days]):
+                if day >= first_list:
+                    cut = day_i
+                    break
+        used_cols = columns[: layout.n_columns]
+        date_index = {day: i for i, day in enumerate(calendar)}
+        for day in values:
+            day_i = date_index.get(day)
+            if day_i is None or day_i >= layout.n_days:
+                continue
+            expected = int(listed_mask(day, columns, delist).sum())
+            published_width = int(layout.indptr[day_i + 1] - layout.indptr[day_i])
+            old_expected = int(listed_mask(day, used_cols, delist).sum())
+            if expected != published_width or old_expected != published_width:
+                cut = day_i if cut is None else min(cut, day_i)
+        return cut
+
+    def _rewrite_from_day(
+        self,
+        factor_name: str,
+        calendar: Sequence[str],
+        columns: Sequence[Column],
+        delist: Dict[int, str],
+        delist_lines: Sequence[str],
+        values: Dict[str, Dict[str, float]],
+        layout: FactorLayout,
+        payload: np.ndarray,
+        from_day: int,
+        to_day: int,
+    ) -> int:
+        if from_day < 0 or from_day > layout.n_days:
+            raise ValueError("重写起点不在已发布范围内")
+        if to_day < from_day:
+            raise ValueError("重写终点早于起点")
+        prefix = payload[: int(layout.indptr[from_day])]
+        packed, widths = self._pack_days(
+            calendar, columns, delist, values, from_day, to_day
+        )
+        full = packed if prefix.size == 0 else np.concatenate([prefix, packed])
+        indptr = np.zeros(to_day + 2, dtype=_INT64)
+        indptr[: from_day + 1] = layout.indptr[: from_day + 1]
+        if widths.size:
+            indptr[from_day + 1 :] = int(layout.indptr[from_day]) + np.cumsum(widths)
+        f32_path, _ = self._factor_paths(factor_name)
+        self._write_payload(f32_path, full)
+        self._publish_layout(factor_name, calendar, columns, delist_lines, indptr)
+        return int(full.size)
+
     def _rewrite_factor(
         self,
         factor_name: str,
@@ -732,13 +841,13 @@ class BinStorage:
         values: Dict[str, Dict[str, float]],
         existing: Optional[Tuple[FactorLayout, np.ndarray, Dict[int, str]]] = None,
     ) -> int:
-        packed, widths = self._pack_days(
-            calendar, columns, delist, values, 0, len(calendar) - 1
-        )
+        end_i = self._publish_end_index(calendar, values)
+        packed, widths = self._pack_days(calendar, columns, delist, values, 0, end_i)
         if existing is not None:
             old_layout, old_payload, old_delist = existing
             old_cols = columns[: old_layout.n_columns]
-            for day_i, day in enumerate(calendar[: old_layout.n_days]):
+            limit = min(old_layout.n_days, end_i + 1)
+            for day_i, day in enumerate(calendar[:limit]):
                 if day in values:
                     continue
                 old_mask = listed_mask(day, old_cols, old_delist)
@@ -747,7 +856,6 @@ class BinStorage:
                 old_row = old_payload[start:stop]
                 new_mask = listed_mask(day, columns, delist)
                 if int(old_mask.sum()) == int(new_mask.sum()) == old_row.size:
-                    # same membership: keep bytes
                     dest = int(np.sum(widths[:day_i]))
                     packed[dest : dest + old_row.size] = old_row
                     continue
@@ -760,7 +868,7 @@ class BinStorage:
                         rebuilt[j] = lookup[sym]
                 dest = int(np.sum(widths[:day_i]))
                 packed[dest : dest + rebuilt.size] = rebuilt
-        indptr = np.zeros(len(calendar) + 1, dtype=_INT64)
+        indptr = np.zeros(end_i + 2, dtype=_INT64)
         if len(widths):
             np.cumsum(widths, out=indptr[1:])
         f32_path, layout_path = self._factor_paths(factor_name)
@@ -779,23 +887,27 @@ class BinStorage:
         values: Dict[str, Dict[str, float]],
         layout: FactorLayout,
         from_day: int,
+        to_day: int,
     ) -> int:
+        if to_day < from_day:
+            return 0
         if from_day < layout.n_days:
             raise ValueError("追加起点落在已发布日期内")
         if from_day > layout.n_days:
             raise ValueError("追加起点越过已发布日期，中间有空洞")
         packed, widths = self._pack_days(
-            calendar, columns, delist, values, from_day, len(calendar) - 1
+            calendar, columns, delist, values, from_day, to_day
         )
-        for day_i, day in enumerate(calendar[from_day:], start=from_day):
+        for day_i, day in enumerate(calendar[from_day : to_day + 1], start=from_day):
             expected = int(listed_mask(day, columns, delist).sum())
             got = int(widths[day_i - from_day])
             if got != expected:
                 raise ValueError(f"{day} 行宽 {got} != 仍上市 {expected}，拒绝发布")
         f32_path, _ = self._factor_paths(factor_name)
         self._append_payload(f32_path, packed)
-        indptr = np.zeros(len(calendar) + 1, dtype=_INT64)
-        indptr[: layout.n_days + 1] = layout.indptr
+        n_days = to_day + 1
+        indptr = np.zeros(n_days + 1, dtype=_INT64)
+        indptr[: layout.n_days + 1] = layout.indptr[: layout.n_days + 1]
         if widths.size:
             indptr[from_day + 1 :] = int(layout.indptr[-1]) + np.cumsum(widths)
         self._publish_layout(factor_name, calendar, columns, delist_lines, indptr)
@@ -853,6 +965,8 @@ class BinStorage:
                     layout, payload, _cal, cols, dmap, _dlines = self._load_published(name)
                 except ValueError:
                     continue
+                if layout.n_days <= 0 or not old:
+                    continue
                 values: Dict[str, Dict[str, float]] = {}
                 used_cols = cols[: layout.n_columns]
                 for day_i, day in enumerate(old[: layout.n_days]):
@@ -867,15 +981,20 @@ class BinStorage:
                             day_vals[col.symbol] = float(row[cursor])
                         cursor += 1
                     values[day] = day_vals
-                packed, widths = self._pack_days(new, columns, delist, values, 0, len(new) - 1)
-                indptr = np.zeros(len(new) + 1, dtype=_INT64)
+                old_last = old[min(layout.n_days, len(old)) - 1]
+                end_i = 0
+                for i, day in enumerate(new):
+                    if day <= old_last:
+                        end_i = i
+                packed, widths = self._pack_days(new, columns, delist, values, 0, end_i)
+                indptr = np.zeros(end_i + 2, dtype=_INT64)
                 if widths.size:
                     np.cumsum(widths, out=indptr[1:])
                 cal_h, col_h, del_h = self._prefix_hashes(
-                    new, columns, delist_lines, len(new), len(columns), len(delist_lines)
+                    new, columns, delist_lines, end_i + 1, len(columns), len(delist_lines)
                 )
                 new_layout = FactorLayout(
-                    n_days=len(new),
+                    n_days=end_i + 1,
                     n_floats=int(indptr[-1]),
                     n_columns=len(columns),
                     n_delist=len(delist_lines),
@@ -964,40 +1083,40 @@ class BinStorage:
             )
         else:
             date_index = {d: i for i, d in enumerate(calendar)}
-            published = existing_layout.n_days
-            patch_days = sorted(
-                {
-                    date_index[d]
-                    for d in values
-                    if d in date_index and date_index[d] < published
-                }
+            if any(day not in date_index for day in values):
+                missing = [day for day in values if day not in date_index]
+                raise ValueError(f"因子日期不在日历: {missing[:3]}")
+            target_end_i = max(date_index[day] for day in values)
+            layout = existing_layout
+            cut_i = self._suffix_cut_index(
+                calendar, columns, delist, values, layout
             )
-            need_tail = published < len(calendar)
-            width_changed = False
-            used_cols = columns[: existing_layout.n_columns]
-            for day_i in patch_days:
-                expected = int(
-                    listed_mask(calendar[day_i], columns, delist).sum()
+            if layout.n_days > target_end_i + 1 and cut_i is not None:
+                raise ValueError(
+                    f"因子 {factor_name} 已发布到 {calendar[layout.n_days - 1]}，"
+                    f"超过本次数据 {calendar[target_end_i]}，且行宽变化，拒绝就地改写。"
+                    "请先运行 scripts/trim_factor_bins.py"
                 )
-                published_width = int(
-                    existing_layout.indptr[day_i + 1] - existing_layout.indptr[day_i]
-                )
-                old_expected = int(listed_mask(calendar[day_i], used_cols, delist).sum())
-                if expected != published_width or expected != old_expected:
-                    width_changed = True
-                    break
-            if width_changed:
-                loaded = self._load_published(factor_name)
-                self._rewrite_factor(
+            if cut_i is not None:
+                payload = self._read_payload(factor_name, int(layout.n_floats))
+                self._rewrite_from_day(
                     factor_name,
                     calendar,
                     columns,
                     delist,
                     delist_lines,
                     values,
-                    (loaded[0], loaded[1], loaded[4]),
+                    layout,
+                    payload,
+                    cut_i,
+                    target_end_i,
                 )
             else:
+                patch_days = sorted(
+                    date_index[day]
+                    for day in values
+                    if date_index[day] < layout.n_days
+                )
                 if patch_days:
                     self._patch_published_days(
                         factor_name,
@@ -1005,10 +1124,10 @@ class BinStorage:
                         columns,
                         delist,
                         values,
-                        existing_layout,
+                        layout,
                         patch_days,
                     )
-                if need_tail:
+                if layout.n_days <= target_end_i:
                     self._append_factor_days(
                         factor_name,
                         calendar,
@@ -1016,8 +1135,9 @@ class BinStorage:
                         delist,
                         delist_lines,
                         values,
-                        existing_layout,
-                        published,
+                        layout,
+                        layout.n_days,
+                        target_end_i,
                     )
 
         min_date = str(min(dates_in))
@@ -1038,14 +1158,57 @@ class BinStorage:
             n_symbols=len(columns),
             price_adjust=price_adjust,
         )
+        published = self._read_layout(factor_name)
         logger.info(
-            "Bin 写入 %s non_nan=%s symbols=%s calendar_days=%s",
+            "Bin 写入 %s non_nan=%s symbols=%s published_days=%s calendar_days=%s",
             factor_name,
             written_values,
             len(columns),
+            published.n_days if published else 0,
             len(calendar),
         )
         return int(written_values)
+
+    def trim_published_from(self, start_date: str) -> Dict[str, str]:
+        """Drop published factor days on/after ``start_date``. Calendar is unchanged.
+
+        Maintenance helper for a dirty tail. Daily ``upsert_factor_data`` never
+        calls this; it assumes the published prefix already ends at real data.
+        """
+        start = _iso_date(start_date)
+        if not start:
+            raise ValueError("start_date 不能为空")
+        calendar = self.read_calendar()
+        if not calendar:
+            return {}
+        first_i = next((i for i, day in enumerate(calendar) if day >= start), None)
+        if first_i is None:
+            return {}
+        columns = self.read_columns()
+        delist_lines = self._delist_lines()
+        last_kept = calendar[first_i - 1] if first_i else ""
+        changed: Dict[str, str] = {}
+        for name in self.list_stored_factor_names():
+            layout = self._read_layout(name)
+            if layout is None or layout.n_days <= first_i:
+                continue
+            if first_i == 0:
+                self.delete_factors([name])
+                changed[name] = ""
+                continue
+            self._truncate_published(
+                name, layout, calendar, columns, delist_lines, first_i
+            )
+            prev = self._meta.get(name) or {}
+            max_date = str(prev.get("max_date") or "")
+            if not max_date or max_date >= start:
+                max_date = last_kept
+            rec = dict(prev)
+            rec["max_date"] = max_date
+            self._meta[name] = rec
+            self._commit_meta(changed=[name])
+            changed[name] = last_kept
+        return changed
 
     def get_factor_latest_date(self, factor_name: str) -> Optional[str]:
         """该因子上次写入的水位，只看 meta，不用日历轴最后一天。

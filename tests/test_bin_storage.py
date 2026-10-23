@@ -318,3 +318,83 @@ def test_factor_latest_date_ignores_future_calendar(tmp_path):
     store.ensure_calendar(["2026-09-21", "2027-10-27"])
     assert store.read_calendar()[-1] == "2027-10-27"
     assert store.get_factor_latest_date("f") == "2026-09-21"
+
+
+def test_future_calendar_does_not_publish_empty_tail(tmp_path):
+    store = _store(tmp_path)
+    store.ensure_calendar(["2020-01-02", "2020-01-03", "2027-10-27"])
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-02", 1.0)]))
+    assert store._read_layout("f").n_days == 1
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-03", 2.0)]))
+    layout = store._read_layout("f")
+    assert layout.n_days == 2
+    assert store.read_calendar()[-1] == "2027-10-27"
+    panel = store.read_factor_panel("f", end_date="2020-01-03")
+    assert list(panel.index) == ["2020-01-02", "2020-01-03"]
+    assert panel.loc["2020-01-03", "SZ000001"] == pytest.approx(2.0)
+
+
+def test_trim_published_from_drops_from_date(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data(
+        "f",
+        _frame(
+            [
+                ("SZ000001", "2020-01-02", 1.0),
+                ("SZ000001", "2020-01-03", 2.0),
+            ]
+        ),
+    )
+    store.ensure_calendar(["2020-01-02", "2020-01-03", "2027-10-27"])
+    calendar = store.read_calendar()
+    layout = store._read_layout("f")
+    store._append_factor_days(
+        "f",
+        calendar,
+        store.read_columns(),
+        store.read_delist(),
+        store._delist_lines(),
+        {},
+        layout,
+        layout.n_days,
+        len(calendar) - 1,
+    )
+    assert store._read_layout("f").n_days == 3
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-03", 3.0)]))
+    assert store._read_layout("f").n_days == 3
+    assert store.get_factor_latest_date("f") == "2020-01-03"
+    changed = store.trim_published_from("2020-01-03")
+    assert changed["f"] == "2020-01-02"
+    assert store._read_layout("f").n_days == 1
+    assert store.get_factor_latest_date("f") == "2020-01-02"
+    panel = store.read_factor_panel("f", end_date="2020-01-02")
+    assert panel.loc["2020-01-02", "SZ000001"] == pytest.approx(1.0)
+
+
+def test_dirty_tail_and_width_change_refuses_upsert(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_factor_data("f", _frame([("SZ000001", "2020-01-02", 1.0)]))
+    store.ensure_calendar(["2020-01-02", "2020-01-03", "2027-10-27"])
+    calendar = store.read_calendar()
+    layout = store._read_layout("f")
+    store._append_factor_days(
+        "f",
+        calendar,
+        store.read_columns(),
+        store.read_delist(),
+        store._delist_lines(),
+        {},
+        layout,
+        layout.n_days,
+        len(calendar) - 1,
+    )
+    with pytest.raises(ValueError, match="trim_factor_bins"):
+        store.upsert_factor_data(
+            "f",
+            _frame(
+                [
+                    ("SZ000001", "2020-01-03", 2.0),
+                    ("SH600000", "2020-01-03", 9.0),
+                ]
+            ),
+        )
