@@ -83,6 +83,33 @@ def scale_percent_ratio(series: pd.Series) -> pd.Series:
     return values
 
 
+def _report_type_code(value) -> str:
+    if pd.isna(value) or value is None:
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    if text in {"nan", "None"}:
+        return ""
+    return text
+
+
+def _prefer_consolidated(frame: pd.DataFrame) -> pd.DataFrame:
+    """因子沿用合并报表。同一键已有 report_type=1 时，不再使用母公司或旧空类型行。"""
+    if frame.empty or "report_type" not in frame.columns:
+        return frame
+    work = frame.copy()
+    work["_rt"] = work["report_type"].map(_report_type_code)
+    if not work["_rt"].eq("1").any():
+        return frame
+    keys = [name for name in ("ts_code", "end_date", "ann_date") if name in work.columns]
+    typed = work.loc[work["_rt"].eq("1"), keys].drop_duplicates()
+    typed["_prefer"] = True
+    marked = work.merge(typed, on=keys, how="left")
+    keep = marked["_prefer"].isna() | marked["_rt"].eq("1")
+    return frame.loc[keep.to_numpy()].copy()
+
+
 def _events_to_wide(
     events: pd.DataFrame, index: pd.Index, columns: pd.Index
 ) -> pd.DataFrame:
@@ -170,7 +197,7 @@ class FinEngine:
             raw = self._injected_statements.get(table)
         else:
             raw = self._load_statement_table(table)
-        frame = self._normalize_events(raw)
+        frame = _prefer_consolidated(self._normalize_events(raw))
         with self._memo_lock:
             cached = self._stmt_frames.get(table)
             if cached is not None:

@@ -19,6 +19,7 @@ from DailyUpdates.storage.etf_schema import (
 from DailyUpdates.storage.event_schema import event_spec
 from DailyUpdates.storage.financial_schema import (
     FINANCIAL_TUSHARE_FIELDS,
+    STATEMENT_TEXT_FIELDS,
     STATEMENT_TUSHARE_FIELDS,
     STATEMENT_VALUE_FIELDS,
     canonicalize_statement_fields,
@@ -80,6 +81,21 @@ def _event_rate_wait_seconds(text: str) -> float:
 def _is_offset_ceiling(text: str) -> bool:
     lowered = text.lower()
     return "offset" in lowered and ("100000" in lowered or "缩小" in text)
+
+
+def _concat_statement_frames(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    """拼报告期时保留全空列。pandas 会在 concat 时丢掉整列都是 NA 的字段。"""
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    columns: List[str] = []
+    seen = set()
+    for frame in frames:
+        for column in frame.columns:
+            if column not in seen:
+                columns.append(column)
+                seen.add(column)
+    return pd.concat(frames, ignore_index=True).reindex(columns=columns)
 
 
 def _is_unreleased_period_error(exc: BaseException) -> bool:
@@ -180,8 +196,9 @@ class TushareDataSource(DataSourceBase):
             if api_name in ('fina_indicator', 'fina_indicator_vip'):
                 return self._fetch_fina_indicator(config, fields, start_date, end_date)
             if statement_table_for_api(api_name):
+                # 不带 fields 时拉整张报表。不能用上面的日线默认字段。
                 return self._fetch_financial_statement(
-                    config, fields, start_date, end_date
+                    config, config.get("fields"), start_date, end_date
                 )
             raise ValueError(f"不支持的财务API接口: {api_name}")
 
@@ -1012,19 +1029,29 @@ class TushareDataSource(DataSourceBase):
     def _fetch_financial_statement(
         self, config: Dict, fields, start_date: str, end_date: str
     ) -> pd.DataFrame:
-        """资产负债表 / 现金流量表瘦身切片。默认 VIP 按报告期，限股票走普通接口。"""
+        """利润表 / 资产负债表 / 现金流量表整表。默认 VIP 按报告期，限股票走普通接口。
+
+        不写 fields 时按合同名单显式请求。income_vip 的默认列不含持续经营净利润。
+        """
         api_name = str(config.get("api_name") or "")
         table = statement_table_for_api(api_name)
         if table is None:
             raise ValueError(f"不支持的财务报表接口: {api_name}")
-        value_fields = STATEMENT_VALUE_FIELDS[table]
-        field_list = list(
-            canonicalize_statement_fields(
-                self._as_field_list(fields) or STATEMENT_TUSHARE_FIELDS[table]
-            )
-        )
-        if "update_flag" not in field_list:
-            field_list.append("update_flag")
+        requested = self._as_field_list(fields)
+        full = not requested
+        if requested:
+            field_list = list(canonicalize_statement_fields(requested))
+            for name in ("report_type", "update_flag"):
+                if name not in field_list:
+                    field_list.append(name)
+            required = [
+                name
+                for name in field_list
+                if name not in {"ts_code", "ann_date", "end_date", "report_type", "update_flag"}
+            ]
+        else:
+            field_list = list(STATEMENT_TUSHARE_FIELDS[table])
+            required = []
         codes = self._codes_from_config(config)
         use_vip = bool(config.get("use_vip", not codes))
         getter = self._statement_getter(table, use_vip=use_vip and not codes)
@@ -1063,9 +1090,39 @@ class TushareDataSource(DataSourceBase):
                 else:
                     tqdm.write(f"[financial] {label} period={period} -> 空")
                 time.sleep(float(config.get("pause_seconds", 1.0)))
-            result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        finalized = self._finalize_fina_frame(result)
-        return self._require_statement_columns(finalized, value_fields, api_name)
+            result = _concat_statement_frames(frames)
+        finalized = self._finalize_statement_frame(result, table)
+        if full:
+            return self._align_full_statement(finalized, table, api_name)
+        return self._require_statement_columns(finalized, required, api_name)
+
+    @staticmethod
+    def _finalize_statement_frame(result: pd.DataFrame, table: str) -> pd.DataFrame:
+        if result is None or result.empty:
+            return pd.DataFrame()
+        if "update_flag" not in result.columns:
+            result["update_flag"] = ""
+        else:
+            result["update_flag"] = (
+                result["update_flag"].fillna("").astype(str).replace({"nan": ""})
+            )
+        if "report_type" not in result.columns:
+            result["report_type"] = ""
+        subset = [
+            column
+            for column in (
+                "ts_code",
+                "end_date",
+                "ann_date",
+                "report_type",
+                "update_flag",
+            )
+            if column in result.columns
+        ]
+        if subset:
+            result = result.drop_duplicates(subset=subset, keep="last")
+        print(f"[financial] {table} 合计 {len(result)} 行，{len(result.columns)} 列", flush=True)
+        return result
 
     def _statement_getter(self, table: str, use_vip: bool) -> Callable:
         vip_name = f"{table}_vip"
@@ -1116,9 +1173,7 @@ class TushareDataSource(DataSourceBase):
                 if part is not None and not part.empty:
                     frames.append(part)
                 time.sleep(pause)
-        if not frames:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True)
+        return _concat_statement_frames(frames)
 
     @staticmethod
     def _codes_from_config(config: Dict) -> List[str]:
@@ -1130,6 +1185,37 @@ class TushareDataSource(DataSourceBase):
         else:
             items = list(raw)
         return [str(item).strip().upper() for item in items if str(item).strip()]
+
+    @staticmethod
+    def _align_full_statement(
+        frame: pd.DataFrame, table: str, api_name: str
+    ) -> pd.DataFrame:
+        """整表拉取时，全空列可能在拼接中消失。缺的合同列补空值，主键科目缺失才失败。"""
+        if frame is None or frame.empty:
+            return pd.DataFrame() if frame is None else frame
+        anchor = {"income": "revenue", "balancesheet": "total_assets", "cashflow": "n_cashflow_act"}[
+            table
+        ]
+        if "ts_code" not in frame.columns or anchor not in frame.columns:
+            raise RuntimeError(
+                f"{api_name} 返回的不是完整{table}，缺少 ts_code 或 {anchor}，"
+                f"实际列={list(frame.columns)}"
+            )
+        expected = [
+            *STATEMENT_TEXT_FIELDS,
+            "report_type",
+            *STATEMENT_VALUE_FIELDS[table],
+        ]
+        missing = [name for name in expected if name not in frame.columns]
+        if missing:
+            print(
+                f"[financial] {table} 有 {len(missing)} 列全空未返回，按空值补齐: {missing}",
+                flush=True,
+            )
+            frame = frame.copy()
+            for name in missing:
+                frame[name] = pd.NA
+        return frame
 
     @staticmethod
     def _require_statement_columns(
@@ -1654,7 +1740,10 @@ class TushareDataSource(DataSourceBase):
                     # 创建参数字典的副本，避免修改原始参数
                     current_paras = paras.copy()
                     current_paras["offset"] = len(df)
-                    tmp = getter(**current_paras, fields=fields)
+                    if fields:
+                        tmp = getter(**current_paras, fields=fields)
+                    else:
+                        tmp = getter(**current_paras)
                     last_error = None
                     break
                 except Exception as exc:

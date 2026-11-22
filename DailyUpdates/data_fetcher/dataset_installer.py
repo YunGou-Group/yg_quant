@@ -353,6 +353,14 @@ class DatasetInstaller:
         if data_type == "financial":
             table = statement_table_for_api(api_name)
             if table:
+                anchor = {
+                    "income": "revenue",
+                    "balancesheet": "total_assets",
+                    "cashflow": "n_cashflow_act",
+                }[table]
+                populated = getattr(self.storage, "statement_column_populated", None)
+                if populated is not None and not populated(table, anchor):
+                    return "full", None
                 latest = self.storage.get_financial_statement_latest_ann_date(table)
             elif api_name in ("fina_indicator", "fina_indicator_vip"):
                 latest = self.storage.get_financial_latest_ann_date()

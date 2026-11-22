@@ -20,7 +20,9 @@ from .financial_schema import (
     FINANCIAL_KEY_COLUMNS,
     FINANCIAL_VALUE_FIELDS,
     STATEMENT_KEY_COLUMNS,
+    STATEMENT_ROW_KEYS,
     STATEMENT_TABLES,
+    STATEMENT_TEXT_FIELDS,
     STATEMENT_VALUE_FIELDS,
 )
 
@@ -247,28 +249,79 @@ class SQLiteStorage:
 
     def _ensure_statement_tables(self, connection: sqlite3.Connection) -> None:
         for table in STATEMENT_TABLES:
+            self._migrate_statement_table(connection, table)
             self._ensure_statement_columns(connection, table)
 
     def _statement_create_sql(self, table: str) -> str:
         table = self._statement_table_name(table)
+        text_sql = ",\n                    ".join(
+            f"{field} TEXT NOT NULL DEFAULT ''" for field in STATEMENT_TEXT_FIELDS
+        )
         value_sql = ",\n                    ".join(
             f"{field} REAL" for field in STATEMENT_VALUE_FIELDS[table]
         )
         return f"""
                 CREATE TABLE IF NOT EXISTS {table} (
                     symbol TEXT NOT NULL,
-                    ann_date TEXT,
+                    ann_date TEXT NOT NULL DEFAULT '',
                     end_date TEXT NOT NULL,
+                    report_type TEXT NOT NULL DEFAULT '',
                     update_flag TEXT NOT NULL DEFAULT '',
+                    {text_sql},
                     {value_sql},
-                    PRIMARY KEY (symbol, end_date, ann_date, update_flag)
+                    PRIMARY KEY (symbol, end_date, ann_date, report_type, update_flag)
                 );
                 CREATE INDEX IF NOT EXISTS idx_{table}_ann ON {table} (ann_date);
                 CREATE INDEX IF NOT EXISTS idx_{table}_end ON {table} (end_date);
                 """
 
-    def _ensure_statement_columns(
+    def _migrate_statement_table(
         self, connection: sqlite3.Connection, table: str
+    ) -> None:
+        """旧表主键没有 report_type，合并报表和母公司报表会互相覆盖。"""
+        table = self._statement_table_name(table)
+        info = list(connection.execute(f"PRAGMA table_info({table})"))
+        if not info:
+            return
+        pk = [row["name"] for row in sorted(info, key=lambda item: item["pk"]) if row["pk"]]
+        wanted = ["symbol", "end_date", "ann_date", "report_type", "update_flag"]
+        if pk == wanted:
+            return
+        old = f"{table}_old"
+        connection.execute(f"DROP TABLE IF EXISTS {old}")
+        connection.execute(f"ALTER TABLE {table} RENAME TO {old}")
+        connection.executescript(self._statement_create_sql(table))
+        new_names = {
+            row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+        }
+        old_names = [row["name"] for row in info]
+        insert_cols = [name for name in old_names if name in new_names]
+        select_expr = []
+        text_cols = {
+            "ann_date",
+            "update_flag",
+            "report_type",
+            *STATEMENT_TEXT_FIELDS,
+        }
+        for name in insert_cols:
+            if name in text_cols:
+                select_expr.append(f"COALESCE(\"{name}\", '')")
+            else:
+                select_expr.append(f'"{name}"')
+        if "report_type" not in insert_cols:
+            insert_cols.append("report_type")
+            select_expr.append("''")
+        quoted = ", ".join(f'"{name}"' for name in insert_cols)
+        connection.execute(
+            f"INSERT INTO {table} ({quoted}) SELECT {', '.join(select_expr)} FROM {old}"
+        )
+        connection.execute(f"DROP TABLE {old}")
+
+    def _ensure_statement_columns(
+        self,
+        connection: sqlite3.Connection,
+        table: str,
+        extra_real: Sequence[str] = (),
     ) -> None:
         table = self._statement_table_name(table)
         existing = {
@@ -276,12 +329,23 @@ class SQLiteStorage:
         }
         if not existing:
             connection.executescript(self._statement_create_sql(table))
-            return
-        for field in STATEMENT_VALUE_FIELDS[table]:
+            existing = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+        for field in (*STATEMENT_TEXT_FIELDS, "report_type"):
+            if field in existing:
+                continue
+            field = self._validate_identifier(field)
+            connection.execute(
+                f'ALTER TABLE {table} ADD COLUMN "{field}" TEXT NOT NULL DEFAULT \'\''
+            )
+            existing.add(field)
+        for field in (*STATEMENT_VALUE_FIELDS[table], *extra_real):
             if field in existing:
                 continue
             field = self._validate_identifier(field)
             connection.execute(f'ALTER TABLE {table} ADD COLUMN "{field}" REAL')
+            existing.add(field)
 
     @staticmethod
     def _statement_table_name(table: str) -> str:
@@ -1197,15 +1261,14 @@ class SQLiteStorage:
 
     def replace_financial_statement(self, table: str, data: pd.DataFrame) -> int:
         table = self._statement_table_name(table)
-        values = STATEMENT_VALUE_FIELDS[table]
-        prepared = self._prepare_financial_rows(data, values)
+        prepared = self._prepare_statement_rows(table, data)
         if prepared is None:
             return 0
-        columns, rows = prepared
+        columns, rows, real_fields = prepared
         quoted = ", ".join(f'"{column}"' for column in columns)
         placeholders = ", ".join("?" for _ in columns)
         with self._connect() as connection:
-            self._ensure_statement_columns(connection, table)
+            self._ensure_statement_columns(connection, table, real_fields)
             connection.execute(f"DELETE FROM {table}")
             connection.executemany(
                 f"INSERT INTO {table} ({quoted}) VALUES ({placeholders})",
@@ -1215,22 +1278,44 @@ class SQLiteStorage:
 
     def upsert_financial_statement(self, table: str, data: pd.DataFrame) -> int:
         table = self._statement_table_name(table)
-        values = STATEMENT_VALUE_FIELDS[table]
-        prepared = self._prepare_financial_rows(data, values)
+        prepared = self._prepare_statement_rows(table, data)
         if prepared is None:
             return 0
-        columns, rows = prepared
+        columns, rows, real_fields = prepared
         quoted = ", ".join(f'"{column}"' for column in columns)
         placeholders = ", ".join("?" for _ in columns)
-        updates = ", ".join(f'"{field}" = excluded."{field}"' for field in values)
+        mutable = [
+            field
+            for field in (*STATEMENT_TEXT_FIELDS, *real_fields)
+            if field not in STATEMENT_ROW_KEYS
+        ]
+        updates = ", ".join(f'"{field}" = excluded."{field}"' for field in mutable)
         sql = (
             f"INSERT INTO {table} ({quoted}) VALUES ({placeholders}) "
-            f"ON CONFLICT(symbol, end_date, ann_date, update_flag) DO UPDATE SET {updates}"
+            "ON CONFLICT(symbol, end_date, ann_date, report_type, update_flag) "
+            f"DO UPDATE SET {updates}"
         )
         with self._connect() as connection:
-            self._ensure_statement_columns(connection, table)
+            self._ensure_statement_columns(connection, table, real_fields)
             connection.executemany(sql, rows)
         return len(rows)
+
+    def statement_column_populated(self, table: str, column: str) -> bool:
+        """整表科目是否已经有值。迁移只加空列时，调度应整表重拉。"""
+        table = self._statement_table_name(table)
+        column = self._validate_identifier(column)
+        with self._connect() as connection:
+            self._migrate_statement_table(connection, table)
+            self._ensure_statement_columns(connection, table)
+            names = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in names:
+                return False
+            row = connection.execute(
+                f'SELECT 1 FROM {table} WHERE "{column}" IS NOT NULL LIMIT 1'
+            ).fetchone()
+            return row is not None
 
     def get_financial_statement_latest_ann_date(self, table: str) -> Optional[str]:
         table = self._statement_table_name(table)
@@ -1248,6 +1333,52 @@ class SQLiteStorage:
 
     def _prepare_financial_indicator(self, data: pd.DataFrame):
         return self._prepare_financial_rows(data, FINANCIAL_VALUE_FIELDS)
+
+    def _prepare_statement_rows(self, table: str, data: pd.DataFrame):
+        if data is None or data.empty:
+            return None
+        frame = data.copy()
+        if "symbol" not in frame.columns and "ts_code" in frame.columns:
+            frame["symbol"] = frame["ts_code"].astype(str).map(self._normalize_symbol)
+        real_fields = list(STATEMENT_VALUE_FIELDS[table])
+        known = set(STATEMENT_ROW_KEYS) | set(STATEMENT_TEXT_FIELDS) | set(real_fields)
+        known.update({"ts_code", "symbol"})
+        for column in frame.columns:
+            name = str(column)
+            if name in known or not _IDENTIFIER_RE.fullmatch(name):
+                continue
+            real_fields.append(name)
+            known.add(name)
+        columns = list(STATEMENT_ROW_KEYS) + list(STATEMENT_TEXT_FIELDS) + real_fields
+        frame = frame.reindex(columns=columns)
+        frame = frame.dropna(subset=["symbol", "end_date"]).copy()
+        frame["symbol"] = frame["symbol"].astype(str)
+        for date_col in ("ann_date", "end_date", "f_ann_date"):
+            frame[date_col] = frame[date_col].map(self._optional_date)
+        for text_col in ("report_type", "comp_type", "end_type", "update_flag"):
+            frame[text_col] = frame[text_col].map(self._statement_text)
+        frame = frame.drop_duplicates(list(STATEMENT_ROW_KEYS), keep="last")
+        rows = [
+            tuple(self._database_value(value) for value in row)
+            for row in frame[columns].itertuples(index=False, name=None)
+        ]
+        return columns, rows, real_fields
+
+    @staticmethod
+    def _statement_text(value) -> str:
+        if pd.isna(value) or value is None:
+            return ""
+        text = str(value).strip()
+        if text.endswith(".0") and text[:-2].isdigit():
+            text = text[:-2]
+        if text in {"nan", "None"}:
+            return ""
+        return text
+
+    def _optional_date(self, value) -> str:
+        if pd.isna(value) or value is None or value == "":
+            return ""
+        return self._date_string(value)
 
     def _prepare_financial_rows(self, data: pd.DataFrame, value_fields: Sequence[str]):
         if data is None or data.empty:
@@ -1511,16 +1642,20 @@ class SQLiteStorage:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as connection:
             self._ensure_statement_columns(connection, table)
-            existing = {
-                row["name"]
-                for row in connection.execute(f"PRAGMA table_info({table})")
-            }
-            select_cols = [
-                name
-                for name in list(STATEMENT_KEY_COLUMNS)
-                + list(STATEMENT_VALUE_FIELDS[table])
-                if name in existing
+            existing = [
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
             ]
+            preferred = [
+                *STATEMENT_ROW_KEYS,
+                *STATEMENT_TEXT_FIELDS,
+                *STATEMENT_VALUE_FIELDS[table],
+            ]
+            seen = set()
+            select_cols = []
+            for name in preferred + existing:
+                if name in existing and name not in seen:
+                    select_cols.append(name)
+                    seen.add(name)
             quoted = ", ".join(f'"{name}"' for name in select_cols)
             sql = (
                 f"SELECT {quoted} FROM {table}{where} "
