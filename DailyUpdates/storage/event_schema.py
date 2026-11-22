@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""业绩预告、业绩快报、股东增减持。
+"""业绩预告、业绩快报、股东增减持、分红送股。
 
-这三张表是公告事件，不进 market_data。
+这些表是公告事件，不进 market_data。
 预告的首次信息日是 first_ann_date，其后的更正落在 ann_date。
 快报和增减持用 ann_date。都不要用 end_date 当信息日。
+分红按除权除息日 ex_date 入账，预案没有除权日，不会进这张表。
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ class EventTable:
     page_rows: int
     chunk_days: int = 1
     min_interval: float = 0.0
+    on_trade_days: bool = False
 
     def tushare_fields(self) -> Tuple[str, ...]:
         seen = []
@@ -153,6 +155,37 @@ EVENT_SPECS: Tuple[EventTable, ...] = (
             EventColumn("total_share", "total_share", "real"),
             EventColumn("begin_date", "begin_date", "date", True),
             EventColumn("close_date", "close_date", "date"),
+        ),
+    ),
+    # 每股金额和比例都相对 1 股。入账用 cash_div_tax，股数乘 1+送股+转增。
+    # stk_div 是送转合计；分项为空的老记录才用它，不要和分项再加一次。
+    EventTable(
+        dataset_name="stock_dividend",
+        api_name="dividend",
+        table="stock_dividend",
+        cursor="ex_date",
+        fetch="day",
+        day_param="ex_date",
+        earliest="20000101",
+        pause=0.2,
+        page_rows=2000,
+        on_trade_days=True,
+        primary_key=("symbol", "end_date", "ex_date", "div_proc"),
+        columns=(
+            EventColumn("symbol", "ts_code", "symbol", True),
+            EventColumn("end_date", "end_date", "date", True),
+            EventColumn("ann_date", "ann_date", "date"),
+            EventColumn("div_proc", "div_proc", "text", True),
+            EventColumn("stk_div", "stk_div", "real"),
+            EventColumn("stk_bo_rate", "stk_bo_rate", "real"),
+            EventColumn("stk_co_rate", "stk_co_rate", "real"),
+            EventColumn("cash_div", "cash_div", "real"),
+            EventColumn("cash_div_tax", "cash_div_tax", "real"),
+            EventColumn("record_date", "record_date", "date"),
+            EventColumn("ex_date", "ex_date", "date", True),
+            EventColumn("pay_date", "pay_date", "date"),
+            EventColumn("div_listdate", "div_listdate", "date"),
+            EventColumn("imp_ann_date", "imp_ann_date", "date"),
         ),
     ),
 )

@@ -591,6 +591,7 @@ class TushareDataSource(DataSourceBase):
                 pause,
                 spec.page_rows,
                 spec.table,
+                on_trade_days=spec.on_trade_days,
             )
         if mode != "period":
             raise ValueError(f"{spec.api_name} 不支持的 fetch_mode: {mode}")
@@ -797,6 +798,7 @@ class TushareDataSource(DataSourceBase):
         pause: float,
         page_rows: int,
         label: str,
+        on_trade_days: bool = False,
     ) -> pd.DataFrame:
         if not start_date or not end_date:
             raise ValueError(f"{label} 按日拉取需要 start_date/end_date")
@@ -805,9 +807,14 @@ class TushareDataSource(DataSourceBase):
         end = min(pd.Timestamp(end_date).normalize(), today)
         if start > end:
             return pd.DataFrame()
-        days = pd.date_range(start, end, freq="D")
+        days = (
+            self._open_trade_days(start, end)
+            if on_trade_days
+            else pd.date_range(start, end, freq="D")
+        )
+        span = "交易日" if on_trade_days else "自然日"
         print(
-            f"[event] {label} 按日拉取 days={len(days)} "
+            f"[event] {label} 按{span}拉取 days={len(days)} "
             f"{start.strftime('%Y%m%d')}->{end.strftime('%Y%m%d')}",
             flush=True,
         )
@@ -829,6 +836,37 @@ class TushareDataSource(DataSourceBase):
         result = pd.concat(frames, ignore_index=True)
         print(f"[event] {label} 合计 {len(result)} 行", flush=True)
         return result
+
+    def _open_trade_days(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeIndex:
+        """上交所开市日。分红除权日只落在交易日，避免把周末打进接口。"""
+        days = []
+        cursor = start
+        while cursor <= end:
+            year_end = min(pd.Timestamp(year=cursor.year, month=12, day=31), end)
+            part = self._call_api(
+                self.pro.trade_cal,
+                {
+                    "exchange": "SSE",
+                    "start_date": cursor.strftime("%Y%m%d"),
+                    "end_date": year_end.strftime("%Y%m%d"),
+                    "is_open": "1",
+                },
+            )
+            if part is not None and not part.empty:
+                col = "cal_date" if "cal_date" in part.columns else part.columns[0]
+                parsed = pd.to_datetime(part[col].astype(str), errors="coerce").dropna()
+                days.extend(parsed.tolist())
+            cursor = year_end + pd.Timedelta(days=1)
+        if not days:
+            return pd.DatetimeIndex([])
+        unique = sorted(
+            {
+                pd.Timestamp(day).normalize()
+                for day in days
+                if start <= pd.Timestamp(day).normalize() <= end
+            }
+        )
+        return pd.DatetimeIndex(unique)
 
     def _fetch_fina_indicator(
         self, config: Dict, fields, start_date: str, end_date: str

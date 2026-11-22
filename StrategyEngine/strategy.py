@@ -14,12 +14,25 @@ from typing import Any, Dict, List, Optional
 from .context import DayContext
 from .holdings import TargetHoldings
 
-# 文件名还要加 _YYYYMMDD_HHMMSS_attribution.json；NTFS 单节上限 255
-_RUN_TAG_MAX = 200
+# 最长产物是 ``{tag}_YYYYMMDD_HHMMSS_attribution.json``。
+# Excel 打不开路径长于 218 的工作簿，报「文件格式或扩展名无效」。
+_EXCEL_PATH_MAX = 218
+_RUN_SUFFIX = "_YYYYMMDD_HHMMSS_attribution.json"
 
 
-def shorten_run_tag(tag: str, max_len: int = _RUN_TAG_MAX) -> str:
-    """超长 run tag 保留前缀并接 sha1，避免 Windows 文件名超限。"""
+def run_tag_max() -> int:
+    """run tag 上限：目录 + tag + 最长后缀不超过 Excel 的路径长度。"""
+    from yg_quant_repo import strategy_runs_dir
+
+    folder = len(str(strategy_runs_dir("backtest"))) + 1
+    room = _EXCEL_PATH_MAX - folder - len(_RUN_SUFFIX) - 8
+    return max(48, room)
+
+
+def shorten_run_tag(tag: str, max_len: int | None = None) -> str:
+    """超长 run tag 保留前缀并接 sha1，避免保存后 Excel 认不出文件。"""
+    if max_len is None:
+        max_len = run_tag_max()
     text = str(tag or "").strip()
     limit = max(16, int(max_len))
     if len(text) <= limit:

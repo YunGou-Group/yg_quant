@@ -29,6 +29,13 @@ from numba import njit
 
 from yg_quant_repo import default_db_path
 
+from DailyUpdates.factor_updates.factors._fin_io import read_financial_indicator_raw
+from DailyUpdates.factor_updates.factors._shared_panel import (
+    events_to_wide,
+    stock_frame,
+    to_wide,
+)
+
 logger = logging.getLogger("Style.engine")
 
 BETA_WINDOW = 252
@@ -66,25 +73,13 @@ def _resolve_db_path() -> Optional[str]:
 
 
 def _normalize_market(data: pd.DataFrame) -> pd.DataFrame:
-    frame = data
-    if "ts_code" not in frame.columns and "symbol" in frame.columns:
-        frame = frame.rename(columns={"symbol": "ts_code"})
-    if "trade_date" not in frame.columns and "date" in frame.columns:
-        frame = frame.rename(columns={"date": "trade_date"})
-    frame = frame.copy()
-    frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
-    frame["ts_code"] = frame["ts_code"].astype(str)
-    mask = ~frame["ts_code"].str.startswith("index_")
-    frame = frame.loc[mask]
-    return frame.sort_values(["ts_code", "trade_date"])
+    return stock_frame(data)
 
 
 def _to_wide(frame: pd.DataFrame, field: str) -> pd.DataFrame:
     if field not in frame.columns:
         raise ValueError(f"风格描述子缺少行情字段: {field}")
-    wide = frame.pivot(index="trade_date", columns="ts_code", values=field)
-    wide = wide.apply(pd.to_numeric, errors="coerce")
-    return wide.sort_index()
+    return to_wide(frame, field)
 
 
 def _wide_to_long(wide: pd.DataFrame, start_date: Optional[str] = None) -> pd.DataFrame:
@@ -210,19 +205,7 @@ def ttm_from_ytd(fin: pd.DataFrame, field: str) -> pd.DataFrame:
 def _events_to_wide(
     events: pd.DataFrame, index: pd.Index, columns: pd.Index
 ) -> pd.DataFrame:
-    empty = pd.DataFrame(np.nan, index=index, columns=columns, dtype=np.float64)
-    if events is None or events.empty:
-        return empty
-    piece = events.dropna(subset=["value"]).copy()
-    if piece.empty:
-        return empty
-    piece["ann_date"] = pd.to_datetime(piece["ann_date"]).dt.strftime("%Y-%m-%d")
-    piece = piece.drop_duplicates(["ts_code", "ann_date"], keep="last")
-    announced = piece.pivot(index="ann_date", columns="ts_code", values="value")
-    calendar = pd.Index(index.astype(str))
-    combined = calendar.union(announced.index).sort_values()
-    wide = announced.reindex(combined).ffill().reindex(calendar)
-    return wide.reindex(columns=columns).astype(np.float64)
+    return events_to_wide(events, index, columns)
 
 
 def _zero_after_listing(ret: np.ndarray, vol: Optional[np.ndarray]) -> np.ndarray:
@@ -593,6 +576,8 @@ class StyleEngine:
         self._industries = industries
         self._sector_names = sector_names
         self._cache: Dict[str, pd.DataFrame] = {}
+        self._pit: Dict[str, pd.DataFrame] = {}
+        self._memo_lock = threading.RLock()
         self._fin: Optional[pd.DataFrame] = None
         self._fin_loaded = False
         self._ref_loaded = False
@@ -634,9 +619,10 @@ class StyleEngine:
         return np.where(np.isfinite(values) & (values > 0), values, np.nan)
 
     def compute(self, key: str) -> pd.DataFrame:
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
+        with self._memo_lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
         dispatch = {
             "size": self._size,
             "beta": self._beta_frame,
@@ -651,8 +637,12 @@ class StyleEngine:
         if key not in dispatch:
             raise KeyError(f"未知风格描述子: {key}")
         frame = self._frame(dispatch[key]())
-        self._cache[key] = frame
-        return frame
+        with self._memo_lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+            self._cache[key] = frame
+            return frame
 
     def _size(self) -> np.ndarray:
         cap = self._positive("total_mv")
@@ -887,9 +877,7 @@ class StyleEngine:
             if not db_path:
                 self._fin = pd.DataFrame()
                 return self._fin
-            from DailyUpdates.storage.sqlite_storage import SQLiteStorage
-
-            frame = SQLiteStorage(db_path).read_financial_indicator()
+            frame = read_financial_indicator_raw()
         if frame is None or frame.empty:
             self._fin = pd.DataFrame()
             return self._fin
@@ -903,13 +891,24 @@ class StyleEngine:
         return frame
 
     def _pit_level(self, field: str) -> pd.DataFrame:
+        with self._memo_lock:
+            hit = self._pit.get(field)
+            if hit is not None:
+                return hit
         template = self._template()
         fin = self._financial_frame()
         if fin.empty or field not in fin.columns:
-            return pd.DataFrame(np.nan, index=template.index, columns=template.columns)
-        events = fin[["ts_code", "ann_date", field]].rename(columns={field: "value"})
-        events = events.dropna(subset=["value"])
-        return _events_to_wide(events, template.index, template.columns)
+            wide = pd.DataFrame(np.nan, index=template.index, columns=template.columns)
+        else:
+            events = fin[["ts_code", "ann_date", field]].rename(columns={field: "value"})
+            events = events.dropna(subset=["value"])
+            wide = _events_to_wide(events, template.index, template.columns)
+        with self._memo_lock:
+            cached = self._pit.get(field)
+            if cached is not None:
+                return cached
+            self._pit[field] = wide
+            return wide
 
     def _pit_ratio(self, field: str) -> pd.DataFrame:
         return self._pit_level(field)

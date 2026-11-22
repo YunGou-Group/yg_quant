@@ -17,6 +17,7 @@ from FactorEvaluates.factor_panel_loader import FactorPanelLoader
 from FactorEvaluates.market_panel_loader import MarketPanelLoader
 
 from ..context import DayContext
+from .dividend import DividendBook, load_dividend_schedule
 
 
 class PanelStore:
@@ -30,6 +31,7 @@ class PanelStore:
         factors: Optional[Mapping[str, np.ndarray]] = None,
         active_start: Optional[str] = None,
         delist_on: Optional[Sequence[str]] = None,
+        dividends: Optional[DividendBook] = None,
     ):
         self.dates = [str(d) for d in dates]
         self.symbols = [str(s) for s in symbols]
@@ -70,6 +72,7 @@ class PanelStore:
                     break
             else:
                 raise ValueError(f"面板没有 {self.active_start} 及之后的交易日")
+        self.dividends: DividendBook = dict(dividends or {})
 
     @property
     def run_dates(self) -> List[str]:
@@ -89,6 +92,7 @@ class PanelStore:
         extra_market: Optional[Mapping[str, np.ndarray]] = None,
         active_start: Optional[str] = None,
         delist_on: Optional[Sequence[str]] = None,
+        dividends: Optional[DividendBook] = None,
     ) -> "PanelStore":
         market: Dict[str, np.ndarray] = {"open": np.asarray(open, dtype=np.float64)}
         if close is not None:
@@ -106,6 +110,7 @@ class PanelStore:
             factors=factors,
             active_start=active_start,
             delist_on=delist_on,
+            dividends=dividends,
         )
 
     @classmethod
@@ -204,6 +209,7 @@ class PanelStore:
                 aligned.index = pd.to_datetime(aligned.index).strftime("%Y-%m-%d")
                 aligned = aligned.reindex(index=open_panel.index, columns=open_panel.columns)
                 factor_panels[name] = aligned.to_numpy(dtype=np.float64)
+        dividends = _load_stock_dividends(market_loader, dates, symbols, log)
         log.info("面板就绪")
         return cls(
             dates=dates,
@@ -213,6 +219,7 @@ class PanelStore:
             factors=factor_panels,
             active_start=start,
             delist_on=delist_dates,
+            dividends=dividends,
         )
 
     @classmethod
@@ -416,6 +423,19 @@ def _apply_etf_qfq(market: Dict[str, np.ndarray], factor: np.ndarray) -> None:
         elif name in _ETF_VOLUME_FIELDS:
             with np.errstate(divide="ignore", invalid="ignore"):
                 market[name] = arr / factor
+
+
+def _load_stock_dividends(market_loader, dates: Sequence[str], symbols: Sequence[str], log) -> DividendBook:
+    storage = getattr(market_loader, "storage", None)
+    if storage is None:
+        return {}
+    book = load_dividend_schedule(storage, dates, symbols)
+    events = sum(int(item[0].size) for item in book.values())
+    if events:
+        log.info("分红实施 %s 笔，除权日 %s 天", events, len(book))
+    else:
+        log.info("分红表在本区间没有可入账的实施记录")
+    return book
 
 
 def _warmup_start(market_loader: MarketPanelLoader, start: Optional[str], warmup: int) -> Optional[str]:

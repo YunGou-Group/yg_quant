@@ -387,6 +387,9 @@ class Alphas:
         self._ind_sector = _load_industry_panel(dates, symbols, IndClass.sector)
         self._ind_industry = _load_industry_panel(dates, symbols, IndClass.industry)
         self._ind_subindustry = _load_industry_panel(dates, symbols, IndClass.subindustry)
+        self._adv_cache: Dict[int, pd.DataFrame] = {}
+        self._neut_cache: Dict[tuple, pd.DataFrame] = {}
+        self._op_lock = threading.RLock()
 
     def _ind(self, level: str) -> pd.Series:
         if level == IndClass.sector:
@@ -395,11 +398,45 @@ class Alphas:
             return self._ind_industry
         return self._ind_subindustry
 
+    def _neutralize_key(self, df: pd.DataFrame, level: str):
+        with self._op_lock:
+            for name in ("open", "high", "low", "close", "volume", "returns", "vwap"):
+                if df is getattr(self, name):
+                    return (name, level)
+            for window, adv in self._adv_cache.items():
+                if df is adv:
+                    return ("adv", window, level)
+        return None
+
     def IndNeutralize(self, df: pd.DataFrame, level: str) -> pd.DataFrame:
-        return indneutralize(df, self._ind(level))
+        key = self._neutralize_key(df, level)
+        if key is None:
+            return indneutralize(df, self._ind(level))
+        with self._op_lock:
+            hit = self._neut_cache.get(key)
+            if hit is not None:
+                return hit
+        value = indneutralize(df, self._ind(level))
+        with self._op_lock:
+            cached = self._neut_cache.get(key)
+            if cached is not None:
+                return cached
+            self._neut_cache[key] = value
+            return value
 
     def _adv(self, window: int) -> pd.DataFrame:
-        return sma(self.volume, window)
+        width = _window(window)
+        with self._op_lock:
+            hit = self._adv_cache.get(width)
+            if hit is not None:
+                return hit
+        value = sma(self.volume, width)
+        with self._op_lock:
+            cached = self._adv_cache.get(width)
+            if cached is not None:
+                return cached
+            self._adv_cache[width] = value
+            return value
 
     # rank(Ts_ArgMax(SignedPower(((returns < 0) ? stddev(returns, 20) : close), 2), 5)) - 0.5
     def alpha001(self):
@@ -1173,7 +1210,10 @@ def _wide_to_long(
 
 
 def prepare_alpha_engine(data: pd.DataFrame, copy: bool = True):
-    """Build wide panels + Alphas engine."""
+    """Build wide panels + Alphas engine.
+
+    Alpha101 有独立的成交量/VWAP 量纲，不与价量引擎共享宽表，避免口径耦合。
+    """
     frame = _normalize_market(data, copy=copy)
     fields = {
         "open": _to_wide(frame, "open"),

@@ -151,6 +151,9 @@ class PriceEngine:
             panel.to_wide(frame, "circ_mv") if "circ_mv" in frame.columns else None
         )
         self.ret = self.close.pct_change()
+        self._memo_lock = threading.RLock()
+        self._factor_memo: Dict[str, pd.DataFrame] = {}
+        self._op_memo: Dict[tuple, pd.DataFrame] = {}
         prev = self.close.shift(1)
         self.tr = self._wrap(
             np.nanmax(
@@ -172,23 +175,70 @@ class PriceEngine:
     def _wrap(self, arr: np.ndarray) -> pd.DataFrame:
         return pd.DataFrame(arr, index=self.close.index, columns=self.close.columns)
 
-    def _ema(self, wide: pd.DataFrame, span: int) -> pd.DataFrame:
-        return wide.ewm(span=span, adjust=False, min_periods=span).mean()
+    def _cached_op(self, kind: str, source: pd.DataFrame, window: int, fn):
+        key = (kind, id(source), int(window))
+        with self._memo_lock:
+            hit = self._op_memo.get(key)
+            if hit is not None:
+                return hit
+        value = fn()
+        with self._memo_lock:
+            cached = self._op_memo.get(key)
+            if cached is not None:
+                return cached
+            self._op_memo[key] = value
+            return value
 
-    def _ma(self, wide: pd.DataFrame, window: int) -> pd.DataFrame:
-        return wide.rolling(window, min_periods=window).mean()
-
-    def _std(self, wide: pd.DataFrame, window: int) -> pd.DataFrame:
-        return wide.rolling(window, min_periods=window).std(ddof=0)
-
-    def _var(self, wide: pd.DataFrame, window: int) -> pd.DataFrame:
-        return wide.rolling(window, min_periods=window).var(ddof=0)
-
-    def compute(self, key: str) -> pd.DataFrame:
+    def _result(self, key: str) -> pd.DataFrame:
+        with self._memo_lock:
+            hit = self._factor_memo.get(key)
+            if hit is not None:
+                return hit
         fn = getattr(self, f"_{key}", None)
         if fn is None:
             raise KeyError(f"未知价量因子: {key}")
-        return fn()
+        value = fn()
+        with self._memo_lock:
+            cached = self._factor_memo.get(key)
+            if cached is not None:
+                return cached
+            self._factor_memo[key] = value
+            return value
+
+    def _ema(self, wide: pd.DataFrame, span: int) -> pd.DataFrame:
+        return self._cached_op(
+            "ema",
+            wide,
+            span,
+            lambda: wide.ewm(span=span, adjust=False, min_periods=span).mean(),
+        )
+
+    def _ma(self, wide: pd.DataFrame, window: int) -> pd.DataFrame:
+        return self._cached_op(
+            "ma",
+            wide,
+            window,
+            lambda: wide.rolling(window, min_periods=window).mean(),
+        )
+
+    def _std(self, wide: pd.DataFrame, window: int) -> pd.DataFrame:
+        return self._cached_op(
+            "std",
+            wide,
+            window,
+            lambda: wide.rolling(window, min_periods=window).std(ddof=0),
+        )
+
+    def _var(self, wide: pd.DataFrame, window: int) -> pd.DataFrame:
+        return self._cached_op(
+            "var",
+            wide,
+            window,
+            lambda: wide.rolling(window, min_periods=window).var(ddof=0),
+        )
+
+    def compute(self, key: str) -> pd.DataFrame:
+        return self._result(key)
 
     def _vol5(self) -> pd.DataFrame:
         return self._ma(self.turn, 5)
@@ -223,7 +273,7 @@ class PriceEngine:
         return 100.0 * num / den
 
     def _arbr(self) -> pd.DataFrame:
-        return self._ar() - self._br()
+        return self._result("ar") - self._result("br")
 
     def _vroc12(self) -> pd.DataFrame:
         lagged = self.vol.shift(12)
@@ -552,7 +602,7 @@ class PriceEngine:
         return (self.amount / self.circ_mv).where(self.circ_mv > 0)
 
     def _jump5(self) -> pd.DataFrame:
-        return self._overnight().abs().rolling(5, min_periods=5).mean()
+        return self._result("overnight").abs().rolling(5, min_periods=5).mean()
 
     def _vol10(self) -> pd.DataFrame:
         return self._ma(self.turn, 10)
@@ -597,10 +647,10 @@ class PriceEngine:
         return self._ema(self.vol, 12) - self._ema(self.vol, 26)
 
     def _vdea(self) -> pd.DataFrame:
-        return self._ema(self._vdiff(), 9)
+        return self._ema(self._result("vdiff"), 9)
 
     def _vmacd(self) -> pd.DataFrame:
-        return self._vdiff() - self._vdea()
+        return self._result("vdiff") - self._result("vdea")
 
     def _vosc(self) -> pd.DataFrame:
         fast = self._ema(self.vol, 12)
@@ -608,7 +658,7 @@ class PriceEngine:
         return 100.0 * (fast - slow) / fast
 
     def _mawvad(self) -> pd.DataFrame:
-        return self._ma(self._wvad(), 6)
+        return self._ma(self._result("wvad"), 6)
 
     def _vstd10(self) -> pd.DataFrame:
         return self._std(self.vol, 10)
@@ -704,10 +754,10 @@ class PriceEngine:
         return self.ret * self.vol
 
     def _single_day_vpt_6(self) -> pd.DataFrame:
-        return self._ma(self._single_day_vpt(), 6)
+        return self._ma(self._result("single_day_vpt"), 6)
 
     def _single_day_vpt_12(self) -> pd.DataFrame:
-        return self._ma(self._single_day_vpt(), 12)
+        return self._ma(self._result("single_day_vpt"), 12)
 
     def _kdj_j(self) -> pd.DataFrame:
         n, span_k, span_d = 9, 5, 5

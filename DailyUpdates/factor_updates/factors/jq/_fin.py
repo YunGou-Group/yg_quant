@@ -10,7 +10,11 @@ from typing import Dict, Optional, Set
 import numpy as np
 import pandas as pd
 
-from yg_quant_repo import default_db_path
+from DailyUpdates.factor_updates.factors._fin_io import (
+    read_financial_indicator_raw,
+    read_financial_statement_raw,
+)
+from DailyUpdates.factor_updates.factors._shared_panel import events_to_wide
 
 from . import _panel as panel
 
@@ -82,19 +86,7 @@ def scale_percent_ratio(series: pd.Series) -> pd.Series:
 def _events_to_wide(
     events: pd.DataFrame, index: pd.Index, columns: pd.Index
 ) -> pd.DataFrame:
-    empty = pd.DataFrame(np.nan, index=index, columns=columns, dtype=np.float64)
-    if events is None or events.empty:
-        return empty
-    piece = events.dropna(subset=["value"]).copy()
-    if piece.empty:
-        return empty
-    piece["ann_date"] = pd.to_datetime(piece["ann_date"]).dt.strftime("%Y-%m-%d")
-    piece = piece.drop_duplicates(["ts_code", "ann_date"], keep="last")
-    announced = piece.pivot(index="ann_date", columns="ts_code", values="value")
-    calendar = pd.Index(index.astype(str))
-    combined = calendar.union(announced.index).sort_values()
-    wide = announced.reindex(combined).ffill().reindex(calendar)
-    return wide.reindex(columns=columns).astype(np.float64)
+    return events_to_wide(events, index, columns)
 
 
 class FinEngine:
@@ -134,6 +126,7 @@ class FinEngine:
         self._stmt_frames: Dict[str, pd.DataFrame] = {}
         self._pit: Dict[str, pd.DataFrame] = {}
         self._derived: Dict[str, pd.DataFrame] = {}
+        self._memo_lock = threading.RLock()
 
     def _normalize_events(self, frame: Optional[pd.DataFrame]) -> pd.DataFrame:
         if frame is None or frame.empty:
@@ -154,9 +147,7 @@ class FinEngine:
         if override is not None:
             frame = override.copy()
         else:
-            from DailyUpdates.storage.sqlite_storage import SQLiteStorage
-
-            frame = SQLiteStorage(str(default_db_path())).read_financial_indicator()
+            frame = read_financial_indicator_raw()
         frame = self._normalize_events(frame)
         if frame.empty:
             return frame
@@ -166,27 +157,31 @@ class FinEngine:
         return frame
 
     def _load_statement_table(self, table: str) -> pd.DataFrame:
-        from DailyUpdates.storage.sqlite_storage import SQLiteStorage
-
         try:
-            return SQLiteStorage(str(default_db_path())).read_financial_statement(table)
+            return read_financial_statement_raw(table)
         except Exception:
             return pd.DataFrame()
 
     def _get_statement(self, table: str) -> pd.DataFrame:
-        if table in self._stmt_frames:
-            return self._stmt_frames[table]
+        with self._memo_lock:
+            if table in self._stmt_frames:
+                return self._stmt_frames[table]
         if self._injected_statements is not None:
             raw = self._injected_statements.get(table)
         else:
             raw = self._load_statement_table(table)
         frame = self._normalize_events(raw)
-        self._stmt_frames[table] = frame
-        return frame
+        with self._memo_lock:
+            cached = self._stmt_frames.get(table)
+            if cached is not None:
+                return cached
+            self._stmt_frames[table] = frame
+            return frame
 
     def pit(self, field: str) -> pd.DataFrame:
-        if field in self._pit:
-            return self._pit[field]
+        with self._memo_lock:
+            if field in self._pit:
+                return self._pit[field]
         if self._fin.empty or field not in self._fin.columns:
             wide = pd.DataFrame(
                 np.nan, index=self.template.index, columns=self.template.columns
@@ -200,13 +195,18 @@ class FinEngine:
                 events = events.assign(update_flag=self._fin["update_flag"])
                 events = events.sort_values(["ts_code", "ann_date", "update_flag"])
             wide = _events_to_wide(events, self.template.index, self.template.columns)
-        self._pit[field] = wide
-        return wide
+        with self._memo_lock:
+            cached = self._pit.get(field)
+            if cached is not None:
+                return cached
+            self._pit[field] = wide
+            return wide
 
     def stmt(self, table: str, field: str) -> pd.DataFrame:
         key = f"{table}:{field}"
-        if key in self._pit:
-            return self._pit[key]
+        with self._memo_lock:
+            if key in self._pit:
+                return self._pit[key]
         events = self._get_statement(table)
         if events.empty or field not in events.columns:
             wide = pd.DataFrame(
@@ -221,8 +221,12 @@ class FinEngine:
                 piece = piece.assign(update_flag=events["update_flag"])
                 piece = piece.sort_values(["ts_code", "ann_date", "update_flag"])
             wide = _events_to_wide(piece, self.template.index, self.template.columns)
-        self._pit[key] = wide
-        return wide
+        with self._memo_lock:
+            cached = self._pit.get(key)
+            if cached is not None:
+                return cached
+            self._pit[key] = wide
+            return wide
 
     def _stmt_wan(self, table: str, field: str) -> pd.DataFrame:
         return self.stmt(table, field) / _YUAN_TO_WAN
@@ -278,9 +282,17 @@ class FinEngine:
         return self.template * np.nan
 
     def _memo(self, key: str, fn) -> pd.DataFrame:
-        if key not in self._derived:
-            self._derived[key] = fn()
-        return self._derived[key]
+        with self._memo_lock:
+            hit = self._derived.get(key)
+            if hit is not None:
+                return hit
+        value = fn()
+        with self._memo_lock:
+            cached = self._derived.get(key)
+            if cached is not None:
+                return cached
+            self._derived[key] = value
+            return value
 
     def _shares(self) -> Optional[pd.DataFrame]:
         if self.total_share is None:
@@ -376,7 +388,15 @@ class FinEngine:
         annual_only: bool = False,
         events: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
-        ev = self._prep_fin_field(field) if events is None else events.copy()
+        if events is None:
+            cache_key = f"yoy:{field}:{how}:{int(annual_only)}"
+            return self._memo(
+                cache_key,
+                lambda: self._yoy_wide(
+                    field, how, annual_only=annual_only, events=self._prep_fin_field(field)
+                ),
+            )
+        ev = events.copy()
         if ev.empty:
             return self._empty()
         if annual_only:
@@ -726,20 +746,26 @@ class FinEngine:
         return (self.pit("profit_dedt") / equity).where(equity > 0)
 
     def _ncf_inv_yoy(self) -> pd.DataFrame:
-        return self._yoy_wide(
-            "n_cashflow_inv_act",
-            "chg",
-            events=self._prep_field(
-                self._get_statement("cashflow"), "n_cashflow_inv_act"
+        return self._memo(
+            "ncf_inv_yoy",
+            lambda: self._yoy_wide(
+                "n_cashflow_inv_act",
+                "chg",
+                events=self._prep_field(
+                    self._get_statement("cashflow"), "n_cashflow_inv_act"
+                ),
             ),
         )
 
     def _ncf_fnc_yoy(self) -> pd.DataFrame:
-        return self._yoy_wide(
-            "n_cash_flows_fnc_act",
-            "chg",
-            events=self._prep_field(
-                self._get_statement("cashflow"), "n_cash_flows_fnc_act"
+        return self._memo(
+            "ncf_fnc_yoy",
+            lambda: self._yoy_wide(
+                "n_cash_flows_fnc_act",
+                "chg",
+                events=self._prep_field(
+                    self._get_statement("cashflow"), "n_cash_flows_fnc_act"
+                ),
             ),
         )
 

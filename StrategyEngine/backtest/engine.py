@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""按日切 ctx → 策略目标 → T+1 开盘撮合。"""
+"""按日切 ctx → 策略目标 → T+1 开盘撮合。除权日在开盘成交前入账。"""
 
 from __future__ import annotations
 
@@ -90,6 +90,8 @@ class Engine:
         )
         last_w: Optional[np.ndarray] = None
         last_px = np.full(n_stocks, np.nan, dtype=np.float64)
+        dividend_cash = 0.0
+        dividend_names = 0
         live_open = np.isfinite(opens) & (opens > 0)
         delist = np.asarray(getattr(self.panel, "delist_on", np.full(n_stocks, "")), dtype="U10")
         if delist.size != n_stocks:
@@ -166,6 +168,10 @@ class Engine:
             targets.append(None if raw is None else target)
             if execute_on is None:
                 continue
+            # 除权日开盘前：隔夜持股拿现金分红和送转。当天开盘才买进的不参与。
+            cash, credited, grown = _apply_dividend(self.panel, execute_on, shares, cash)
+            dividend_cash += credited
+            dividend_names += grown
             want = target.aligned(self.panel.symbols)
             if _hold_shares(shares, want, last_w):
                 continue
@@ -188,6 +194,8 @@ class Engine:
             if report.nav_before > 0:
                 turnover[k + 1] = report.traded_notional / report.nav_before
 
+        if dividend_cash > 0 or dividend_names:
+            _LOG.info("分红入账 现金 %.2f，送转 %s 笔", dividend_cash, dividend_names)
         return EngineResult(
             dates=list(self.panel.dates[t0:]),
             nav=navs,
@@ -231,6 +239,29 @@ class Engine:
                 raw = TargetHoldings(asof=raw.asof, execute_on=execute_on, weights=raw.weights)
             return raw
         return TargetHoldings.from_array(asof, execute_on, symbols, np.asarray(raw, dtype=np.float64))
+
+
+def _apply_dividend(panel: PanelStore, date: str, shares: np.ndarray, cash: float):
+    """用除权日前的股数入账。现金先加，再乘送转，两者都按调整前股数。"""
+    book = getattr(panel, "dividends", None) or {}
+    item = book.get(str(date))
+    if not item:
+        return cash, 0.0, 0
+    idx, cash_ps, mult = item
+    held = shares[idx]
+    entitled = held > _HOLD_EPS
+    if not np.any(entitled):
+        return cash, 0.0, 0
+    idx = idx[entitled]
+    held = held[entitled]
+    cash_ps = np.asarray(cash_ps, dtype=np.float64)[entitled]
+    mult = np.asarray(mult, dtype=np.float64)[entitled]
+    credited = float(np.dot(held, cash_ps))
+    cash = float(cash) + credited
+    grow = mult > 1.0 + 1e-12
+    if np.any(grow):
+        shares[idx[grow]] *= mult[grow]
+    return cash, credited, int(grow.sum())
 
 
 def _hold_shares(shares: np.ndarray, want: np.ndarray, last_w: Optional[np.ndarray]) -> bool:

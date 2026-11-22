@@ -388,7 +388,7 @@ def main():
             'fields': list(CASHFLOW_TUSHARE_FIELDS),
             'primary_key': ['ts_code', 'end_date', 'ann_date', 'update_flag'],
         },
-        # 业绩预告 / 快报 / 股东增减持。事件表，不进 market_data。
+        # 业绩预告 / 快报 / 股东增减持 / 分红送股。事件表，不进 market_data。
         **{
             name: {**cfg, "token": tushare_token}
             for name, cfg in event_dataset_configs().items()
