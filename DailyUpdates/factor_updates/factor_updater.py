@@ -29,12 +29,17 @@ for _p in Path(__file__).resolve().parents:
         break
 else:
     raise RuntimeError("找不到 yg_quant 仓库根目录（缺少 yg_quant_repo.py）")
-from yg_quant_repo import default_db_path, ensure_repo_root
+from yg_quant_repo import (
+    default_db_path,
+    default_market_projection_dir,
+    ensure_repo_root,
+)
 
 ensure_repo_root()
 
 from DailyUpdates.factor_updates.base_factor import BaseFactor
 from DailyUpdates.storage import BinStorage, SQLiteStorage
+from DataStore import MarketProjectionReader
 
 # 滚动窗口类因子的默认回看自然日（覆盖约 250 交易日量级）。
 _FACTOR_LOOKBACK_DAYS = 450
@@ -59,6 +64,18 @@ class FactorUpdater:
         rebuild: Optional[bool] = None,
     ):
         self.storage = SQLiteStorage(db_path)
+        projection_override = os.getenv("YG_QUANT_MARKET_PROJECTION_DIR", "").strip()
+        projection_dir = (
+            Path(projection_override).expanduser().resolve()
+            if projection_override
+            else (
+                default_market_projection_dir()
+                if Path(db_path).expanduser().resolve() == default_db_path()
+                else Path(db_path).expanduser().resolve().parent / "market_projection"
+            )
+        )
+        self._market_projection_dir = projection_dir
+        self._market_projection: Optional[MarketProjectionReader] = None
         self.max_workers = max_workers
         self.rebuild = _env_flag("YG_QUANT_FACTOR_REBUILD") if rebuild is None else bool(rebuild)
         self._rebuild_scope: Optional[set] = None
@@ -304,7 +321,13 @@ class FactorUpdater:
             adjust,
         )
         started = time.time()
-        data = self.storage.read_market_data(
+        if self._market_projection is None:
+            self._market_projection = MarketProjectionReader(
+                str(self._market_projection_dir),
+                sidecar_storage=self.storage,
+                strict=True,
+            )
+        data = self._market_projection.read_market_data(
             fields=fields,
             start_date=start_date,
             end_date=end_date,

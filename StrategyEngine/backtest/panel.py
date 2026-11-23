@@ -13,8 +13,7 @@ import pandas as pd
 from Universes.catalog import build_mask as build_universe_mask
 from Universes.rules import delist_on, iso_day
 
-from FactorEvaluates.factor_panel_loader import FactorPanelLoader
-from FactorEvaluates.market_panel_loader import MarketPanelLoader
+from DataStore import FactorPanelLoader, MarketPanelLoader
 
 from ..context import DayContext
 from .dividend import DividendBook, load_dividend_schedule
@@ -146,9 +145,16 @@ class PanelStore:
             log.info("预热 %s 个交易日，加载 %s ~ %s，回测从 %s 起", warmup, fetch_start or "库起点", end or "库终点", start)
         else:
             log.info("加载 open %s ~ %s", start or "库起点", end or "库终点")
-        open_panel = market_loader.load_open(
-            start_date=fetch_start, end_date=end, adjust=exec_adjust
+        requested_market = ["open", *[
+            str(field) for field in market_fields if str(field) != "open"
+        ]]
+        loaded_market = market_loader.load_fields(
+            requested_market,
+            start_date=fetch_start,
+            end_date=end,
+            adjust=exec_adjust,
         )
+        open_panel = loaded_market["open"]
         if open_panel.empty:
             raise ValueError("open 面板为空")
         open_panel = open_panel.copy()
@@ -167,18 +173,10 @@ class PanelStore:
         market: Dict[str, np.ndarray] = {
             "open": open_panel.to_numpy(dtype=np.float64),
         }
-        for field in market_fields:
-            name = str(field)
-            if name == "open":
-                continue
+        extra_names = requested_market[1:]
+        for name in extra_names:
             log.info("加载 %s", name)
-            try:
-                panel = market_loader.load_field(
-                    name, start_date=fetch_start, end_date=end, adjust=exec_adjust
-                )
-            except ValueError:
-                log.warning("行情字段 %s 不在库中，跳过", name)
-                continue
+            panel = loaded_market.get(name)
             if panel is None or panel.empty:
                 log.warning("行情字段 %s 为空，跳过", name)
                 continue

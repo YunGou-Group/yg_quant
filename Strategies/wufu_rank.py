@@ -19,7 +19,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from FactorEvaluates.market_panel_loader import MarketPanelLoader
+from DataStore import MarketPanelLoader
 from StrategyEngine.allocators import Allocator, EqualWeight
 from StrategyEngine.context import DayContext
 from StrategyEngine.holdings import TargetHoldings

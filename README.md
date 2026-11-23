@@ -76,6 +76,15 @@ python -m DailyUpdates.data_fetcher.main_scheduler
 
 空库从 `20050101` 重建，之后按最后交易日增量。增删数据集改 [`main_scheduler.py`](DailyUpdates/data_fetcher/main_scheduler.py) 里的 `dataset_config`。默认 Tushare；也可把 `data_source` 改成 `Akshare`。
 
+SQLite 的 `market_data` 是唯一底账；调度器写库成功后，会原子发布
+`market_projection/` 中的股票日频 float64 面板，供因子、评估和回测快速读取。
+指数、ETF、财务和事件数据仍直接读取 SQLite。投影缺失、落后或损坏时读取会明确失败；
+可用以下命令从底账全量重建：
+
+```powershell
+python -m DailyUpdates.storage.market_projection --rebuild
+```
+
 | 参数 | 含义 |
 |------|------|
 | `--start YYYYMMDD` | 可选起点。空库仍从 `20050101` 起；有库时与最后交易日取较晚者。也可用 `YG_QUANT_START_DATE`。 |
@@ -263,6 +272,7 @@ Akshare 真实接口默认跳过，设 `AKSHARE_LIVE=1` 才跑。
 ```text
 data/
   yg_quant.db
+  market_projection/
   factors/
   factor_eval/
   style_crowding/
@@ -277,6 +287,7 @@ data/
 |------|------|
 | `YG_QUANT_DATA_DIR` | `<仓库根>/data` |
 | `YG_QUANT_DB_PATH` | `<数据根>/yg_quant.db` |
+| `YG_QUANT_MARKET_PROJECTION_DIR` | 库同级 `market_projection/` |
 | `YG_QUANT_FACTOR_DIR` | 库同级 `factors/` |
 | `YG_QUANT_EVAL_DIR` | 库同级 `factor_eval/` |
 | `YG_QUANT_STYLE_CROWDING_DIR` | `<数据根>/style_crowding/` |
@@ -289,4 +300,6 @@ data/
 
 ### 库表
 
-行情在 `market_data`，因子在 `data/factors/` 的 bin，不进 SQLite。其余是行业、股票资料、财务、指数成分等 sidecar。财务截面对齐用 `ann_date`。
+行情底账在 `market_data`；股票日频数值列另发布为 `data/market_projection/` 下的
+float64 读取投影，不替代 SQLite。因子在 `data/factors/` 的 bin，不进 SQLite。
+其余是行业、股票资料、财务、指数成分等 sidecar。财务截面对齐用 `ann_date`。

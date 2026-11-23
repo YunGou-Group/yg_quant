@@ -27,6 +27,10 @@ class _Store:
             return None, None
         return min(self.local_days), max(self.local_days)
 
+    def upsert_trade_calendar(self, days):
+        self.local_days = sorted(set(self.local_days) | set(days))
+        return len(days)
+
 
 class _Pro:
     def __init__(self, days):

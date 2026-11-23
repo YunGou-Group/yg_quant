@@ -18,9 +18,8 @@ from ..exposure_engine import (
     ExposureEngine,
     transform_style_arrays,
 )
-from ..factor_panel_loader import FactorPanelLoader
+from DataStore import FactorPanelLoader, MarketPanelLoader
 from ..industry_panel import load_l1_code_panel
-from ..market_panel_loader import MarketPanelLoader
 from ..return_calculator import ReturnCalculator
 from ..metrics.extra_ic_metrics import DECAY_HORIZONS
 

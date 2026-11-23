@@ -9,7 +9,7 @@ from typing import Iterable, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from ..factor_panel_loader import FactorPanelLoader
+from DataStore import FactorPanelLoader
 from .shared_panel_store import SharedPanelStore
 
 

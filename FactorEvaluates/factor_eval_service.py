@@ -14,8 +14,7 @@ import pandas as pd
 from .exposure_engine import RAW_STYLE_NAMES, ExposureEngine
 from .industry_panel import load_l1_code_panel
 from .factor_evaluator import FactorEvaluator
-from .factor_panel_loader import FactorPanelLoader
-from .market_panel_loader import HS300_SYMBOL, MarketPanelLoader
+from DataStore import FactorPanelLoader, HS300_SYMBOL, MarketPanelLoader
 from .metric_discoverer import MetricDiscoverer
 from Universes.catalog import build_mask as build_universe_mask
 
@@ -51,6 +50,7 @@ class FactorEvalService:
         self.evaluator = evaluator or FactorEvaluator(discoverer=self.discoverer)
         self._open: Optional[pd.DataFrame] = None
         self._calculator: Optional[ReturnCalculator] = None
+        self._open_generation: Optional[str] = None
         self._factor_name: Optional[str] = None
         self._factor_panel: Optional[pd.DataFrame] = None
         self._open_lock = threading.Lock()
@@ -60,7 +60,7 @@ class FactorEvalService:
 
     def _data_end(self) -> Optional[str]:
         """评估默认终点：行情最后一根 K 线，不是 trade_calendar 里尚未拉数的未来开市日。"""
-        latest = self.market_loader.storage.get_latest_market_date()
+        latest = self.market_loader.projection.latest_date()
         if not latest:
             return None
         latest = str(latest)
@@ -247,12 +247,15 @@ class FactorEvalService:
         return self.writer.list_factor(factor_name)
 
     def _ensure_open(self) -> pd.DataFrame:
-        if self._open is not None:
+        self.market_loader.projection.refresh()
+        generation = self.market_loader.projection.generation_id
+        if self._open is not None and self._open_generation == generation:
             return self._open
         with self._open_lock:
-            if self._open is None:
-                print("[eval] 正在从 SQLite 透视 open 宽表（可能较久）…", flush=True)
+            if self._open is None or self._open_generation != generation:
+                print("[eval] 正在读取行情投影 open 面板…", flush=True)
                 self._open = self.market_loader.load_open()
+                self._open_generation = self.market_loader.projection.generation_id
                 if self._open is not None and not self._open.empty:
                     self._calculator = ReturnCalculator(self._open)
                 else:

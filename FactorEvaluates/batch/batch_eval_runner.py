@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
-from ..factor_panel_loader import FactorPanelLoader
+from DataStore import FactorPanelLoader
 from yg_quant_repo import default_eval_dir
 from ..metric_discoverer import MetricDiscoverer
 from .batch_result_writer import BatchResultWriter

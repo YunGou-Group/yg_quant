@@ -14,8 +14,8 @@ import pandas as pd
 
 from DailyUpdates.storage import SQLiteStorage
 from FactorEvaluates.industry_panel import load_l1_code_panel
-from FactorEvaluates.market_panel_loader import HS300_SYMBOL, MarketPanelLoader
-from yg_quant_repo import default_db_path
+from DataStore import HS300_SYMBOL, MarketPanelLoader, MarketProjectionReader
+from yg_quant_repo import default_db_path, default_market_projection_dir
 from StrategyEngine.live.codes import to_qmt_code
 from StrategyEngine.run import _SAFE_STEM, _snapshot_path
 
@@ -395,7 +395,14 @@ def _load_prices(
         return {}, {}
     start = min(dates)
     end = max(dates)
-    frame = storage.read_market_data(
+    projection_dir = (
+        default_market_projection_dir()
+        if Path(storage.db_path).resolve() == default_db_path().resolve()
+        else Path(storage.db_path).resolve().parent / "market_projection"
+    )
+    frame = MarketProjectionReader(
+        str(projection_dir), sidecar_storage=storage, strict=True
+    ).read_market_data(
         fields=["open", "close"],
         start_date=start.replace("-", ""),
         end_date=end.replace("-", ""),

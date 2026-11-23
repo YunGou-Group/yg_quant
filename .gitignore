@@ -47,3 +47,7 @@ desktop.ini
 doc/
 scripts/
 tests/
+!tests/
+tests/*
+!tests/market_projection/
+!tests/market_projection/*.py

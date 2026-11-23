@@ -13,8 +13,7 @@ import pandas as pd
 
 from DailyUpdates.storage import SQLiteStorage
 from FactorEvaluates.exposure_engine import ExposureEngine, NLSIZE_NAME, RAW_STYLE_NAMES, SIZE_NAME
-from FactorEvaluates.factor_panel_loader import FactorPanelLoader
-from FactorEvaluates.market_panel_loader import MarketPanelLoader
+from DataStore import FactorPanelLoader, MarketPanelLoader
 from FactorEvaluates.style_return_engine import StyleReturnEngine
 from Universes.catalog import build_mask as build_universe_mask
 from yg_quant_repo import default_db_path, default_factor_dir
@@ -231,13 +230,18 @@ def build_context(settings: StyleCrowdingSettings) -> StyleCrowdingContext:
 
     start = settings.start_date or None
     end = settings.end_date or None
-    close = loader.load_field("close", start_date=start, end_date=end)
-    pre_close = loader.load_field("pre_close", start_date=start, end_date=end)
-    pb = loader.load_field("pb", start_date=start, end_date=end)
-    pe = loader.load_field("pe", start_date=start, end_date=end)
-    ps = loader.load_field("ps", start_date=start, end_date=end)
-    circ_mv = loader.load_field("circ_mv", start_date=start, end_date=end)
-    open_panel = loader.load_open(start_date=start, end_date=end)
+    market = loader.load_fields(
+        ["close", "pre_close", "pb", "pe", "ps", "circ_mv", "open"],
+        start_date=start,
+        end_date=end,
+    )
+    close = market["close"]
+    pre_close = market["pre_close"]
+    pb = market["pb"]
+    pe = market["pe"]
+    ps = market["ps"]
+    circ_mv = market["circ_mv"]
+    open_panel = market["open"]
 
     style_names = list(RAW_STYLE_NAMES)
     raw_styles = factor_loader.load_many(style_names, start_date=start, end_date=end)

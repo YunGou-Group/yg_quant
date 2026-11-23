@@ -277,8 +277,7 @@ class WufuMix(WufuAlpha088):
 
 
 def _load_momentum_style_perf(start: str, end: str) -> pd.Series:
-    from FactorEvaluates.factor_panel_loader import FactorPanelLoader
-    from FactorEvaluates.market_panel_loader import MarketPanelLoader
+    from DataStore import FactorPanelLoader, MarketPanelLoader
 
     style = FactorPanelLoader().load("style_momentum", start_date=start, end_date=end)
     close = MarketPanelLoader().load_field("close", start_date=start, end_date=end)

@@ -31,7 +31,7 @@ import pandas as pd
 
 from FactorEvaluates.exposure_engine import RAW_STYLE_NAMES, SIZE_NAME, ExposureEngine
 from FactorEvaluates.industry_panel import load_l1_code_panel
-from FactorEvaluates.market_panel_loader import MarketPanelLoader
+from DataStore import MarketPanelLoader
 from StrategyEngine.allocators import Allocator, EqualWeight
 from StrategyEngine.context import DayContext
 from StrategyEngine.holdings import TargetHoldings

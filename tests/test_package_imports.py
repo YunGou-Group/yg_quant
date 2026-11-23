@@ -10,6 +10,7 @@ from yg_quant_repo import load_repo_env
 
 
 def test_storage_and_updater_imports():
+    from DataStore import FactorPanelLoader, MarketPanelLoader
     from DailyUpdates.storage import BinStorage, SQLiteStorage
     from DailyUpdates.factor_updates.base_factor import BaseFactor
     from DailyUpdates.factor_updates.factor_updater import FactorUpdater
@@ -19,6 +20,8 @@ def test_storage_and_updater_imports():
 
     assert SQLiteStorage.__name__ == "SQLiteStorage"
     assert BinStorage.__name__ == "BinStorage"
+    assert MarketPanelLoader.__name__ == "MarketPanelLoader"
+    assert FactorPanelLoader.__name__ == "FactorPanelLoader"
     assert issubclass(FactorUpdater, object)
     assert issubclass(BaseFactor, object)
     assert UnifiedScheduler.__name__ == "UnifiedScheduler"
@@ -47,12 +50,16 @@ def test_eval_and_app_imports():
 def test_strategy_and_universe_imports():
     from StrategyEngine.attribution.engine import run_attribution
     from StrategyEngine.backtest.engine import Engine
+    from StrategyEngine.backtest.panel import PanelStore
     from StrategyEngine.live import to_qmt_code
+    from StyleCrowding.context import StyleCrowdingContext
     from StyleCrowding.config import default_settings
     from Universes.catalog import names
     from Strategies.small_cap import SmallCapStrategy
 
     assert Engine.__name__ == "Engine"
+    assert PanelStore.__name__ == "PanelStore"
+    assert StyleCrowdingContext.__name__ == "StyleCrowdingContext"
     assert callable(run_attribution)
     assert to_qmt_code("SH600000") == "600000.SH"
     assert default_settings().output_root

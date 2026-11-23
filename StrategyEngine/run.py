@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import pandas as pd
 
-from FactorEvaluates.market_panel_loader import HS300_SYMBOL, MarketPanelLoader
+from DataStore import HS300_SYMBOL, MarketPanelLoader
 from yg_quant_repo import default_data_dir, strategy_runs_dir
 
 from .allocators import REGISTRY, get_allocator

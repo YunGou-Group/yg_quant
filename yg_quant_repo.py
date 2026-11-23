@@ -90,6 +90,13 @@ def default_factor_dir() -> Path:
     return default_db_path().parent / "factors"
 
 
+def default_market_projection_dir() -> Path:
+    override = _env_path("YG_QUANT_MARKET_PROJECTION_DIR")
+    if override is not None:
+        return override
+    return default_db_path().parent / "market_projection"
+
+
 def default_eval_dir() -> Path:
     override = _env_path("YG_QUANT_EVAL_DIR")
     if override is not None:

@@ -301,17 +301,19 @@ class StockDataUpdater:
 
     def _missing_trade_days(self, start: str, end: str) -> list:
         """远端已开市、本地日历没有的交易日（中间空洞，不是 latest 之后的增量）。"""
-        remote = self._trade_days(start, end)
         digits_s = "".join(ch for ch in str(start) if ch.isdigit())[:8]
         digits_e = "".join(ch for ch in str(end) if ch.isdigit())[:8]
         start_iso = f"{digits_s[:4]}-{digits_s[4:6]}-{digits_s[6:8]}"
         end_iso = f"{digits_e[:4]}-{digits_e[4:6]}-{digits_e[6:8]}"
+        # _trade_days 会把远端日历写入本地；必须先拍下旧日历，否则空洞会被
+        # 日历回填掩盖，行情本身永远不会补拉。
         local = set(
             str(d)
             for d in self.storage.list_trade_dates(
                 start_date=start_iso, end_date=end_iso
             )
         )
+        remote = self._trade_days(start, end)
         return [day for day in remote if day not in local]
 
     def _write_trade_days(self, days: list) -> bool:

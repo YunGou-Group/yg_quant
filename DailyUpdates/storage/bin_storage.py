@@ -45,9 +45,36 @@ import pandas as pd
 logger = logging.getLogger("BinStorage")
 
 _FLOAT32 = np.dtype("<f4")
+_FLOAT64 = np.dtype("<f8")
 _INT64 = np.dtype("<i8")
 _LAYOUT_MAGIC = b"YGL1"
 _LAYOUT_HEADER = struct.Struct("<4s4Q32s32s32s")
+
+
+def write_array_all(fd: int, values: np.ndarray, dtype: np.dtype) -> None:
+    """Write a complete numeric array, handling short ``os.write`` calls."""
+    blob = memoryview(np.asarray(values, dtype=dtype).tobytes())
+    written = 0
+    while written < len(blob):
+        n = os.write(fd, blob[written:])
+        if n <= 0:
+            raise OSError("写入数值载荷时发生短写")
+        written += n
+
+
+def read_array_file(path: Path, dtype: np.dtype, count: int) -> np.ndarray:
+    """Read exactly ``count`` values from a raw packed payload."""
+    count = int(count)
+    expected = count * int(dtype.itemsize)
+    if not path.is_file():
+        raise ValueError(f"载荷不存在: {path}")
+    size = path.stat().st_size
+    if size < expected:
+        raise ValueError(f"载荷 {path} 只有 {size} 字节，期望至少 {expected}")
+    values = np.fromfile(path, dtype=dtype, count=count)
+    if values.size != count:
+        raise ValueError(f"载荷 {path} 读取 {values.size} 个值，期望 {count}")
+    return values
 def _axis_lock(root: Path) -> threading.RLock:
     key = str(root)
     with _AXIS_LOCKS_GUARD:
@@ -632,9 +659,7 @@ class BinStorage:
             raise ValueError(
                 f"因子 {factor_name} 载荷 {n_file} 短于 layout.n_floats {layout.n_floats}"
             )
-        payload = np.fromfile(f32_path, dtype=_FLOAT32, count=layout.n_floats)
-        if payload.size < layout.n_floats:
-            raise ValueError(f"因子 {factor_name} 读取短于 n_floats")
+        payload = read_array_file(f32_path, _FLOAT32, layout.n_floats)
         return layout, payload, calendar, columns, published_delist, delist_lines
 
     def _pack_days(
@@ -704,7 +729,7 @@ class BinStorage:
         tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o666)
         try:
-            os.write(fd, np.asarray(payload, dtype=_FLOAT32).tobytes())
+            write_array_all(fd, payload, _FLOAT32)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -717,7 +742,7 @@ class BinStorage:
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
         fd = os.open(str(path), flags, 0o666)
         try:
-            os.write(fd, np.asarray(payload, dtype=_FLOAT32).tobytes())
+            write_array_all(fd, payload, _FLOAT32)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -734,10 +759,7 @@ class BinStorage:
 
     def _read_payload(self, factor_name: str, n_floats: int) -> np.ndarray:
         f32_path, _ = self._factor_paths(factor_name)
-        payload = np.fromfile(f32_path, dtype=_FLOAT32, count=int(n_floats))
-        if payload.size < int(n_floats):
-            raise ValueError(f"因子 {factor_name} 读取短于 n_floats")
-        return payload
+        return read_array_file(f32_path, _FLOAT32, int(n_floats))
 
     def _truncate_published(
         self,

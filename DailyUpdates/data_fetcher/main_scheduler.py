@@ -16,12 +16,18 @@ for _p in Path(__file__).resolve().parents:
         break
 else:
     raise RuntimeError("找不到 yg_quant 仓库根目录（缺少 yg_quant_repo.py）")
-from yg_quant_repo import default_db_path, ensure_repo_root
+from yg_quant_repo import (
+    default_db_path,
+    default_market_projection_dir,
+    ensure_repo_root,
+)
 
 ensure_repo_root()
 
 from DailyUpdates.data_fetcher.unified_scheduler import UnifiedScheduler
 from DailyUpdates.factor_updates.factor_updater import FactorUpdater
+from DailyUpdates.storage import SQLiteStorage
+from DailyUpdates.storage.market_projection import MarketProjectionWriter
 from DailyUpdates.storage.etf_schema import (
     ETF_EXTRA_TS_CODES,
     ETF_TUSHARE_BASIC_FIELDS,
@@ -457,6 +463,23 @@ def main():
         for line in result.get("execution_log") or []:
             logger.error("调度日志: %s", line)
         logger.error("行情调度失败，跳过因子更新: %s", result.get("error_message"))
+        sys.exit(1)
+
+    # SQLite 是行情底账；因子、评估和回测只读原子发布的股票日频投影。
+    try:
+        projection = MarketProjectionWriter(
+            SQLiteStorage(db_path), str(default_market_projection_dir())
+        )
+        published = projection.publish()
+        projection.validate()
+        logger.info(
+            "行情投影已发布: epoch=%s commit=%s through=%s",
+            published["epoch"],
+            published["commit"],
+            published["source_stock_max_date"],
+        )
+    except Exception:
+        logger.exception("行情投影发布失败，跳过因子更新")
         sys.exit(1)
 
     # 行情更新完成后：清理已删除的因子类对应数据，再增量/全量更新因子。

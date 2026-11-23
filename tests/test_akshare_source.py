@@ -59,8 +59,9 @@ def test_daily_maps_unadjusted_bars(monkeypatch):
     src = AkshareDataSource()
     monkeypatch.setattr(src, "_codes", lambda _cfg: ["000001"])
     monkeypatch.setattr(
-        "DailyUpdates.data_fetcher.data_sources.akshare_data_source.ak.stock_zh_a_hist",
-        lambda **_k: _hist_frame(),
+        src,
+        "_hist_one",
+        lambda symbol, *_a, **_k: src._normalize_em_hist(_hist_frame(), symbol),
     )
     monkeypatch.setattr(
         "DailyUpdates.data_fetcher.data_sources.akshare_data_source.time.sleep",
@@ -137,17 +138,14 @@ def test_adj_factor_is_hfq_over_raw(monkeypatch):
         lambda *_a, **_k: None,
     )
 
-    def fake_hist(symbol, period="daily", start_date="", end_date="", adjust=""):
+    def fake_hist(symbol, _start="", _end="", adjust=""):
         frame = _hist_frame()
         if adjust == "hfq":
             frame = frame.copy()
             frame["收盘"] = frame["收盘"] * 2
-        return frame
+        return src._normalize_em_hist(frame, symbol)
 
-    monkeypatch.setattr(
-        "DailyUpdates.data_fetcher.data_sources.akshare_data_source.ak.stock_zh_a_hist",
-        fake_hist,
-    )
+    monkeypatch.setattr(src, "_hist_one", fake_hist)
     out = src.fetch_data(
         {
             "data_type": "daily",

@@ -26,9 +26,8 @@ from FactorEvaluates.exposure_engine import (
     ExposureMatrix,
     is_industry_col,
 )
-from FactorEvaluates.factor_panel_loader import FactorPanelLoader
+from DataStore import FactorPanelLoader, MarketPanelLoader
 from FactorEvaluates.industry_panel import load_l1_code_panel
-from FactorEvaluates.market_panel_loader import MarketPanelLoader
 from FactorEvaluates.style_return_engine import StyleReturnEngine
 from Universes.catalog import build_mask
 

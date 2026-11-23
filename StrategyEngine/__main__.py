@@ -18,7 +18,7 @@ relaunch_as_module("StrategyEngine")
 import argparse
 from datetime import datetime
 
-from FactorEvaluates.market_panel_loader import HS300_SYMBOL, MarketPanelLoader
+from DataStore import HS300_SYMBOL, MarketPanelLoader
 from yg_quant_repo import strategy_runs_dir
 
 from .backtest import Engine, summarize, trades_frame, write_run_snapshot

@@ -25,21 +25,16 @@ from .financial_schema import (
     STATEMENT_TEXT_FIELDS,
     STATEMENT_VALUE_FIELDS,
 )
+from .price_adjust import (
+    ADJ_FACTOR_COLUMN,
+    ADJUSTABLE_FIELDS,
+    ADJUST_MODES,
+    adjust_long_frame,
+)
 
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SYSTEM_COLUMNS = {"symbol", "date", "ts_code", "trade_date"}
-
-ADJ_FACTOR_COLUMN = "adj_factor"
-# 后复权口径（Tushare 官方公式）：后复权价 = 原始价 × adj_factor。
-# 成交量按 1/adj_factor 缩放，使 vwap = amount / vol 同样是后复权价。
-ADJ_PRICE_FIELDS = frozenset(
-    {"open", "high", "low", "close", "pre_close", "up_limit", "down_limit"}
-)
-ADJ_VOLUME_FIELDS = frozenset({"vol"})
-# amount / pct_chg / 市值 / 估值字段本身已是除权口径或与复权无关，保持原值。
-ADJUSTABLE_FIELDS = ADJ_PRICE_FIELDS | ADJ_VOLUME_FIELDS
-ADJUST_MODES = ("none", "hfq")
 
 logger = logging.getLogger("SQLiteStorage")
 
@@ -108,6 +103,18 @@ class SQLiteStorage:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_action TEXT NOT NULL DEFAULT ''
                 );
+
+                CREATE TABLE IF NOT EXISTS projection_changes (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL DEFAULT 'market_data',
+                    min_date TEXT NOT NULL DEFAULT '',
+                    max_date TEXT NOT NULL DEFAULT '',
+                    fields_json TEXT NOT NULL DEFAULT '[]',
+                    axis_dirty INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_projection_changes_seq
+                    ON projection_changes (seq);
 
                 CREATE TABLE IF NOT EXISTS stock_namechange (
                     symbol TEXT NOT NULL,
@@ -514,6 +521,17 @@ class SQLiteStorage:
         dates = [(date,) for date in sorted(frame["trade_date"].unique())]
 
         with self._connect() as connection:
+            stock_frame = frame.loc[
+                ~frame["symbol"].astype(str).str.startswith("index_")
+            ]
+            existing_stocks = {
+                str(row["symbol"])
+                for row in connection.execute(
+                    "SELECT symbol FROM instruments WHERE is_index = 0"
+                )
+            }
+            incoming_stocks = set(stock_frame["symbol"].astype(str))
+            axis_dirty = bool(incoming_stocks - existing_stocks)
             self._ensure_market_columns(connection, fields)
             connection.executemany(sql, rows)
             connection.executemany(
@@ -530,6 +548,20 @@ class SQLiteStorage:
             connection.executemany(
                 "INSERT OR IGNORE INTO trade_calendar (trade_date) VALUES (?)", dates
             )
+            if not stock_frame.empty:
+                connection.execute(
+                    """
+                    INSERT INTO projection_changes (
+                        table_name, min_date, max_date, fields_json, axis_dirty
+                    ) VALUES ('market_data', ?, ?, ?, ?)
+                    """,
+                    (
+                        str(stock_frame["trade_date"].min()),
+                        str(stock_frame["trade_date"].max()),
+                        json.dumps(sorted(fields), ensure_ascii=False),
+                        int(axis_dirty),
+                    ),
+                )
         return len(rows)
 
     def read_market_data(
@@ -616,16 +648,7 @@ class SQLiteStorage:
                 gap,
                 int(stock_rows.sum()),
             )
-        scaled = factor.copy()
-        scaled.loc[~stock_rows] = 1.0
-        scaled.loc[stock_rows & ~usable] = np.nan
-        factor_arr = scaled.to_numpy(dtype="float64")
-        for field in requested:
-            if field in ADJ_PRICE_FIELDS:
-                frame[field] = pd.to_numeric(frame[field], errors="coerce") * factor_arr
-            elif field in ADJ_VOLUME_FIELDS:
-                frame[field] = pd.to_numeric(frame[field], errors="coerce") / factor_arr
-        return frame.loc[:, ["ts_code", "trade_date", *requested]]
+        return adjust_long_frame(frame, requested)
 
     def get_instruments(self, include_indexes: bool = False) -> Set[str]:
         sql = "SELECT symbol FROM instruments"
@@ -654,6 +677,56 @@ class SQLiteStorage:
                 "SELECT MAX(trade_date) AS latest FROM market_data"
             ).fetchone()
             return row["latest"] if row and row["latest"] else None
+
+    def get_latest_stock_market_date(self) -> Optional[str]:
+        """股票行情水位；指数先更新不能冒充股票投影已就绪。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(trade_date) AS latest
+                FROM market_data
+                WHERE symbol NOT LIKE 'index\\_%' ESCAPE '\\'
+                """
+            ).fetchone()
+            return row["latest"] if row and row["latest"] else None
+
+    def get_projection_change_seq(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS seq FROM projection_changes"
+            ).fetchone()
+            return int(row["seq"] if row else 0)
+
+    def list_projection_changes(self, after_seq: int = 0) -> List[Dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT seq, table_name, min_date, max_date,
+                       fields_json, axis_dirty, created_at
+                FROM projection_changes
+                WHERE seq > ?
+                ORDER BY seq
+                """,
+                (int(after_seq),),
+            ).fetchall()
+        out: List[Dict] = []
+        for row in rows:
+            try:
+                fields = json.loads(row["fields_json"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                fields = []
+            out.append(
+                {
+                    "seq": int(row["seq"]),
+                    "table_name": str(row["table_name"]),
+                    "min_date": str(row["min_date"] or ""),
+                    "max_date": str(row["max_date"] or ""),
+                    "fields": list(fields),
+                    "axis_dirty": bool(row["axis_dirty"]),
+                    "created_at": str(row["created_at"] or ""),
+                }
+            )
+        return out
 
     def list_trade_dates(
         self,
@@ -797,6 +870,13 @@ class SQLiteStorage:
             return 0
         placeholders = ", ".join("?" for _ in symbols)
         with self._connect() as connection:
+            stock_count = connection.execute(
+                f"""
+                SELECT COUNT(*) AS c FROM instruments
+                WHERE symbol IN ({placeholders}) AND is_index = 0
+                """,
+                symbols,
+            ).fetchone()["c"]
             connection.execute(
                 f"DELETE FROM market_data WHERE symbol IN ({placeholders})",
                 symbols,
@@ -805,6 +885,14 @@ class SQLiteStorage:
                 f"DELETE FROM instruments WHERE symbol IN ({placeholders})",
                 symbols,
             )
+            if stock_count:
+                connection.execute(
+                    """
+                    INSERT INTO projection_changes (
+                        table_name, fields_json, axis_dirty
+                    ) VALUES ('market_data', '[]', 1)
+                    """
+                )
         return len(symbols)
 
     def drop_market_fields(self, fields: Iterable[str]) -> List[str]:
@@ -820,6 +908,15 @@ class SQLiteStorage:
                     f'ALTER TABLE market_data DROP COLUMN "{field}"'
                 )
                 dropped.append(field)
+            if dropped:
+                connection.execute(
+                    """
+                    INSERT INTO projection_changes (
+                        table_name, fields_json, axis_dirty
+                    ) VALUES ('market_data', ?, 1)
+                    """,
+                    (json.dumps(sorted(dropped), ensure_ascii=False),),
+                )
         return dropped
 
     def replace_registry(self, dataset_config: Dict[str, Dict]) -> None:
@@ -1088,6 +1185,13 @@ class SQLiteStorage:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             list(by_qmt.values()),
         )
+        connection.execute(
+            """
+            INSERT INTO projection_changes (
+                table_name, fields_json, axis_dirty
+            ) VALUES ('stock_basic', '["symbol", "list_date", "delist_date"]', 1)
+            """
+        )
         return len(by_qmt)
 
     def clear_industry_data(
@@ -1201,11 +1305,26 @@ class SQLiteStorage:
                 f"VALUES ({', '.join('?' for _ in columns)})",
                 rows,
             )
+            connection.execute(
+                """
+                INSERT INTO projection_changes (
+                    table_name, fields_json, axis_dirty
+                ) VALUES ('stock_basic', '["list_date", "delist_date"]', 1)
+                """
+            )
         return len(rows)
 
     def clear_stock_basic(self) -> None:
         with self._connect() as connection:
-            connection.execute("DELETE FROM stock_basic")
+            changed = connection.execute("DELETE FROM stock_basic").rowcount
+            if changed:
+                connection.execute(
+                    """
+                    INSERT INTO projection_changes (
+                        table_name, fields_json, axis_dirty
+                    ) VALUES ('stock_basic', '["list_date", "delist_date"]', 1)
+                    """
+                )
 
     def read_stock_basic(self, symbols: Optional[Sequence[str]] = None) -> pd.DataFrame:
         clauses = []
@@ -1858,7 +1977,32 @@ class SQLiteStorage:
             "list_status = excluded.list_status"
         )
         with self._connect() as connection:
+            before = {
+                str(row["symbol"]): (
+                    str(row["list_date"] or ""),
+                    str(row["delist_date"] or ""),
+                )
+                for row in connection.execute(
+                    "SELECT symbol, list_date, delist_date FROM stock_basic"
+                )
+            }
+            list_i = columns.index("list_date")
+            delist_i = columns.index("delist_date")
+            symbol_i = columns.index("symbol")
+            axis_dirty = any(
+                before.get(str(row[symbol_i]))
+                != (str(row[list_i] or ""), str(row[delist_i] or ""))
+                for row in rows
+            )
             connection.executemany(sql, rows)
+            if axis_dirty:
+                connection.execute(
+                    """
+                    INSERT INTO projection_changes (
+                        table_name, fields_json, axis_dirty
+                    ) VALUES ('stock_basic', '["list_date", "delist_date"]', 1)
+                    """
+                )
         return len(rows)
 
     def _prepare_stock_basic(self, data: pd.DataFrame):

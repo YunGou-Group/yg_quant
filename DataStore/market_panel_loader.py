@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""行情面板加载者：从 SQLite 读 open 宽表，供 ReturnCalculator 使用。"""
+"""共享行情面板加载者：从 SQLite 读取日期 × 标的宽表。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from DailyUpdates.storage import SQLiteStorage
-from yg_quant_repo import default_db_path
+from yg_quant_repo import default_db_path, default_market_projection_dir
+
+from .market_projection_reader import MarketProjectionReader
 
 HS300_SYMBOL = os.getenv("YG_QUANT_BETA_INDEX", "index_SH000300")
 
@@ -19,7 +21,6 @@ HS300_SYMBOL = os.getenv("YG_QUANT_BETA_INDEX", "index_SH000300")
 def default_adjust() -> str:
     """价格面板默认复权口径，可用 YG_QUANT_PRICE_ADJUST=none 关闭。"""
     return (os.getenv("YG_QUANT_PRICE_ADJUST") or "hfq").strip().lower()
-
 
 
 INDEX_LABELS = {
@@ -39,12 +40,36 @@ INDEX_LABELS = {
 
 
 class MarketPanelLoader:
-    def __init__(self, db_path: Optional[str] = None):
-        path = db_path or str(default_db_path())
-        self.storage = SQLiteStorage(str(Path(path).expanduser().resolve()))
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        *,
+        projection_dir: Optional[str] = None,
+        strict_projection: bool = True,
+    ):
+        path = Path(db_path or default_db_path()).expanduser().resolve()
+        self.storage = SQLiteStorage(str(path))
+        if projection_dir is not None:
+            self._projection_root = Path(projection_dir).expanduser().resolve()
+        elif path == default_db_path().expanduser().resolve():
+            self._projection_root = default_market_projection_dir()
+        else:
+            self._projection_root = path.parent / "market_projection"
+        self._strict_projection = bool(strict_projection)
+        self._projection: Optional[MarketProjectionReader] = None
         self._field_panels: Dict[str, pd.DataFrame] = {}
         self._index_close: Optional[pd.Series] = None
         self._index_symbol: Optional[str] = None
+
+    @property
+    def projection(self) -> MarketProjectionReader:
+        if self._projection is None:
+            self._projection = MarketProjectionReader(
+                str(self._projection_root),
+                sidecar_storage=self.storage,
+                strict=self._strict_projection,
+            )
+        return self._projection
 
     def load_open(
         self,
@@ -73,29 +98,61 @@ class MarketPanelLoader:
     ) -> pd.DataFrame:
         key = str(field)
         mode = (adjust or default_adjust()).strip().lower()
-        cache_key = f"{key}|{start_date}|{end_date}|{mode}"
+        reader = self.projection
+        if reader.refresh():
+            self._field_panels.clear()
+        cache_key = (
+            f"stock|{reader.generation_id}|{key}|{start_date}|{end_date}|{mode}"
+        )
         if cache_key in self._field_panels and not reload:
             return self._field_panels[cache_key]
-        data = self.storage.read_market_data(
-            fields=[key],
+        panel = reader.read_panel(
+            key,
             start_date=start_date,
             end_date=end_date,
-            ordered=False,
             adjust=mode,
         )
-        if data.empty or key not in data.columns:
-            panel = pd.DataFrame()
-        else:
-            frame = data.copy()
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
-            frame["ts_code"] = frame["ts_code"].astype(str)
-            panel = (
-                frame.pivot(index="trade_date", columns="ts_code", values=key)
-                .sort_index()
-                .astype("float64")
-            )
         self._field_panels[cache_key] = panel
         return panel
+
+    def load_fields(
+        self,
+        fields,
+        *,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        adjust: Optional[str] = None,
+    ) -> Dict[str, pd.DataFrame]:
+        mode = (adjust or default_adjust()).strip().lower()
+        reader = self.projection
+        if reader.refresh():
+            self._field_panels.clear()
+        missing = []
+        out: Dict[str, pd.DataFrame] = {}
+        for field in fields:
+            key = str(field)
+            cache_key = (
+                f"stock|{reader.generation_id}|{key}|{start_date}|{end_date}|{mode}"
+            )
+            if cache_key in self._field_panels:
+                out[key] = self._field_panels[cache_key]
+            else:
+                missing.append(key)
+        if missing:
+            loaded = reader.read_panels(
+                missing,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=mode,
+            )
+            for key, panel in loaded.items():
+                cache_key = (
+                    f"stock|{reader.generation_id}|{key}|"
+                    f"{start_date}|{end_date}|{mode}"
+                )
+                self._field_panels[cache_key] = panel
+                out[key] = panel
+        return {str(field): out[str(field)] for field in fields}
 
     def list_index_symbols(self) -> list:
         return self.storage.list_index_symbols()
@@ -121,7 +178,9 @@ class MarketPanelLoader:
             self._index_close = pd.Series(dtype="float64")
             return self._index_close
         frame = data.copy()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime(
+            "%Y-%m-%d"
+        )
         series = pd.to_numeric(frame.set_index("trade_date")["close"], errors="coerce")
         series = series[~series.index.duplicated(keep="last")].sort_index()
         self._index_symbol = code
@@ -165,7 +224,9 @@ class MarketPanelLoader:
             panel = pd.DataFrame()
         else:
             frame = data.copy()
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime(
+                "%Y-%m-%d"
+            )
             frame["ts_code"] = frame["ts_code"].astype(str)
             panel = (
                 frame.pivot(index="trade_date", columns="ts_code", values=key)
@@ -201,8 +262,12 @@ class MarketPanelLoader:
             "symbol": symbol,
             "label": INDEX_LABELS.get(symbol, symbol),
             "scalars": {
-                "cum_last": float(cum_clean.iloc[-1]) if len(cum_clean) else float("nan"),
-                "max_drawdown": float(dd_clean.min()) if len(dd_clean) else float("nan"),
+                "cum_last": float(cum_clean.iloc[-1])
+                if len(cum_clean)
+                else float("nan"),
+                "max_drawdown": float(dd_clean.min())
+                if len(dd_clean)
+                else float("nan"),
                 "n_days": int(len(valid)),
             },
             "series": {
